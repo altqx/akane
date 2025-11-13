@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Akane Uploader</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 40px; max-width: 700px; }
+    h1 { font-size: 1.8rem; }
+    form { margin-top: 20px; display: flex; flex-direction: column; gap: 12px; }
+    input[type="file"] { padding: 6px 0; }
+    button { padding: 8px 14px; border: none; background: #111827; color: #fff; border-radius: 4px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: default; }
+    #result { margin-top: 20px; font-size: 0.95rem; }
+    #result a { color: #2563eb; word-break: break-all; }
+    #error { margin-top: 10px; color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <form id="uploadForm">
+    <input type="file" id="fileInput" name="file" accept="video/*,.mkv" required />
+    <button type="submit">Upload</button>
+  </form>
+  <div id="result"></div>
+  <div id="error"></div>
+
+  <script>
+    const form = document.getElementById('uploadForm');
+    const fileInput = document.getElementById('fileInput');
+    const resultEl = document.getElementById('result');
+    const errorEl = document.getElementById('error');
+    const button = form.querySelector('button');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      resultEl.textContent = '';
+      errorEl.textContent = '';
+
+      const file = fileInput.files[0];
+      if (!file) {
+        errorEl.textContent = 'Please select a file.';
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      button.disabled = true;
+      button.textContent = 'Uploading...';
+
+      try {
+        const res = await fetch('/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || 'Upload failed');
+        }
+
+        const data = await res.json();
+        if (data.playlist_url) {
+          resultEl.innerHTML = 'Playlist URL: <a href="' + data.playlist_url + '" target="_blank" rel="noopener noreferrer">' + data.playlist_url + '</a>';
+        } else {
+          resultEl.textContent = 'No playlist_url in response.';
+        }
+      } catch (err) {
+        errorEl.textContent = err.message || String(err);
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Upload';
+      }
+    });
+  </script>
+</body>
+</html>
