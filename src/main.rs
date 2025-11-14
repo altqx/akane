@@ -3,8 +3,8 @@ use std::{ net::SocketAddr, path::PathBuf, sync::Arc };
 use anyhow::{ Context, Result };
 use sqlx::{ SqlitePool, migrate::MigrateDatabase, Sqlite };
 use futures::{ stream::{ self, StreamExt }, future::try_join_all };
-use tokio::sync::Semaphore;
-use axum::{ extract::{ State, Multipart }, routing::post, Router, Json };
+use tokio::sync::{ Semaphore, RwLock };
+use axum::{ extract::{ State, Multipart, Path }, routing::{ post, get }, Router, Json };
 use axum::extract::DefaultBodyLimit;
 use aws_sdk_s3::{ config::Region, Client as S3Client };
 use serde::Serialize;
@@ -14,6 +14,17 @@ use tracing::{ error, info };
 use tracing_subscriber::{ layer::SubscriberExt, util::SubscriberInitExt };
 use uuid::Uuid;
 use dotenv::dotenv;
+use std::collections::HashMap;
+
+#[derive(Clone, Debug, Serialize)]
+struct ProgressUpdate {
+    stage: String,
+    current_chunk: u32,
+    total_chunks: u32,
+    percentage: u32,
+}
+
+type ProgressMap = Arc<RwLock<HashMap<String, ProgressUpdate>>>;
 
 #[derive(Clone, Debug)]
 struct VideoVariant {
@@ -28,11 +39,21 @@ struct AppState {
     bucket: String,
     public_base_url: String,
     db_pool: SqlitePool,
+    progress: ProgressMap,
 }
 
 #[derive(Serialize)]
 struct UploadResponse {
     playlist_url: String,
+    upload_id: String,
+}
+
+#[derive(Serialize)]
+struct ProgressResponse {
+    stage: String,
+    current_chunk: u32,
+    total_chunks: u32,
+    percentage: u32,
 }
 
 #[tokio::main]
@@ -89,15 +110,19 @@ async fn main() -> Result<()> {
     
     info!("Database initialized successfully");
 
+    let progress: ProgressMap = Arc::new(RwLock::new(HashMap::new()));
+
     let state = AppState {
         s3,
         bucket: r2_bucket,
         public_base_url,
         db_pool,
+        progress: progress.clone(),
     };
 
     let app = Router::new()
         .route("/upload", post(upload_video))
+        .route("/progress/:upload_id", get(get_progress))
         .fallback_service(ServeDir::new("public"))
         // e.g. 1 GB body limit
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
@@ -172,6 +197,18 @@ async fn upload_video(
         (axum::http::StatusCode::BAD_REQUEST, "missing field 'name'".to_string())
     })?;
 
+    // Create a unique upload ID for progress tracking
+    let upload_id = Uuid::new_v4().to_string();
+
+    // Initialize progress
+    let initial_progress = ProgressUpdate {
+        stage: "Uploading to server".to_string(),
+        current_chunk: 0,
+        total_chunks: 1,
+        percentage: 0,
+    };
+    state.progress.write().await.insert(upload_id.clone(), initial_progress);
+
     // Encode to HLS (playlist + segments) into a temp directory
     let output_id = Uuid::new_v4().to_string();
     let hls_dir = std::env::temp_dir().join(format!("hls-{}", &output_id));
@@ -187,7 +224,25 @@ async fn upload_video(
     let variants = get_variants_for_height(original_height);
     let available_resolutions: Vec<String> = variants.iter().map(|v| v.label.clone()).collect();
 
-    encode_to_hls(&video_path, &hls_dir).await.map_err(|e| internal_err(e))?;
+    // Update progress: FFmpeg processing stage
+    let encoding_progress = ProgressUpdate {
+        stage: "FFmpeg processing".to_string(),
+        current_chunk: 0,
+        total_chunks: variants.len() as u32,
+        percentage: 0,
+    };
+    state.progress.write().await.insert(upload_id.clone(), encoding_progress);
+
+    encode_to_hls(&video_path, &hls_dir, &state.progress, &upload_id).await.map_err(|e| internal_err(e))?;
+
+    // Update progress: Upload to R2 stage
+    let upload_progress = ProgressUpdate {
+        stage: "Upload to R2".to_string(),
+        current_chunk: 0,
+        total_chunks: 1,
+        percentage: 0,
+    };
+    state.progress.write().await.insert(upload_id.clone(), upload_progress);
 
     // Upload HLS to R2
     let prefix = format!("{}/", output_id);
@@ -224,7 +279,7 @@ async fn upload_video(
     let _ = fs::remove_file(&video_path).await;
     let _ = fs::remove_dir_all(&hls_dir).await;
 
-    Ok(Json(UploadResponse { playlist_url }))
+    Ok(Json(UploadResponse { playlist_url, upload_id }))
 }
 
 async fn get_video_height(input: &PathBuf) -> Result<u32> {
@@ -296,7 +351,7 @@ fn get_variants_for_height(original_height: u32) -> Vec<VideoVariant> {
         .collect()
 }
 
-async fn encode_to_hls(input: &PathBuf, out_dir: &PathBuf) -> Result<()> {
+async fn encode_to_hls(input: &PathBuf, out_dir: &PathBuf, progress: &ProgressMap, upload_id: &str) -> Result<()> {
     use tokio::process::Command;
 
     fs::create_dir_all(out_dir).await?;
@@ -326,14 +381,20 @@ async fn encode_to_hls(input: &PathBuf, out_dir: &PathBuf) -> Result<()> {
     let input = Arc::new(input.clone());
     let out_dir = Arc::new(out_dir.clone());
     let video_codec = Arc::new(video_codec);
+    let progress = Arc::new(progress.clone());
+    let upload_id = upload_id.to_string();
 
     let mut encode_tasks = Vec::new();
+    let total_variants = variants.len() as u32;
     
-    for variant in variants.clone() {
+    for (index, variant) in variants.clone().iter().enumerate() {
         let input = Arc::clone(&input);
         let out_dir = Arc::clone(&out_dir);
         let video_codec = Arc::clone(&video_codec);
         let semaphore = Arc::clone(&semaphore);
+        let progress = Arc::clone(&progress);
+        let upload_id = upload_id.clone();
+        let variant = variant.clone();
         
         let task = tokio::task::spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
@@ -398,6 +459,17 @@ async fn encode_to_hls(input: &PathBuf, out_dir: &PathBuf) -> Result<()> {
             if !status.success() {
                 anyhow::bail!("ffmpeg exited with status: {} for variant {}", status, variant.label);
             }
+
+            // Update progress for this variant
+            let current_chunk = (index + 1) as u32;
+            let percentage = ((current_chunk as f32 / total_variants as f32) * 100.0) as u32;
+            let updated_progress = ProgressUpdate {
+                stage: "FFmpeg processing".to_string(),
+                current_chunk,
+                total_chunks: total_variants,
+                percentage,
+            };
+            progress.write().await.insert(upload_id.clone(), updated_progress);
             
             Ok::<_, anyhow::Error>(())
         });
@@ -448,7 +520,8 @@ async fn encode_to_hls(input: &PathBuf, out_dir: &PathBuf) -> Result<()> {
     let master_playlist_path = out_dir.join("index.m3u8");
     let mut master_content = String::from("#EXTM3U\n#EXT-X-VERSION:3\n");
 
-    for variant in &variants {
+    let variants_ref = get_variants_for_height(get_video_height(input.as_ref()).await?);
+    for variant in &variants_ref {
         let bandwidth = variant.bitrate.trim_end_matches('k').parse::<u32>().unwrap_or(1000) * 1000;
         master_content.push_str(&format!(
             "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{}\n",
@@ -463,6 +536,20 @@ async fn encode_to_hls(input: &PathBuf, out_dir: &PathBuf) -> Result<()> {
         .context("failed to write master playlist")?;
 
     Ok(())
+}
+
+async fn get_progress(
+    State(state): State<AppState>,
+    Path(upload_id): Path<String>,
+) -> Json<Option<ProgressResponse>> {
+    let progress_map = state.progress.read().await;
+    let progress = progress_map.get(&upload_id).cloned();
+    Json(progress.map(|p| ProgressResponse {
+        stage: p.stage,
+        current_chunk: p.current_chunk,
+        total_chunks: p.total_chunks,
+        percentage: p.percentage,
+    }))
 }
 
 async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str) -> Result<String> {
