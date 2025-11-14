@@ -30,6 +30,7 @@ dependencies = [
  "axum",
  "chrono",
  "dotenv",
+ "futures",
  "regex",
  "serde",
  "serde_json",

@@ -1,7 +1,9 @@
-use std::{ net::SocketAddr, path::PathBuf };
+use std::{ net::SocketAddr, path::PathBuf, sync::Arc };
 
 use anyhow::{ Context, Result };
 use sqlx::{ SqlitePool, migrate::MigrateDatabase, Sqlite };
+use futures::{ stream::{ self, StreamExt }, future::try_join_all };
+use tokio::sync::Semaphore;
 use axum::{ extract::{ State, Multipart }, routing::post, Router, Json };
 use axum::extract::DefaultBodyLimit;
 use aws_sdk_s3::{ config::Region, Client as S3Client };
@@ -175,9 +177,13 @@ async fn upload_video(
     let hls_dir = std::env::temp_dir().join(format!("hls-{}", &output_id));
     fs::create_dir_all(&hls_dir).await.map_err(|e| internal_err(anyhow::anyhow!(e)))?;
 
-    // Get video metadata before encoding
-    let video_duration = get_video_duration(&video_path).await.map_err(|e| internal_err(e))?;
-    let original_height = get_video_height(&video_path).await.map_err(|e| internal_err(e))?;
+    // Get video metadata before encoding (parallel)
+    let (video_duration, original_height) = tokio::join!(
+        get_video_duration(&video_path),
+        get_video_height(&video_path)
+    );
+    let video_duration = video_duration.map_err(|e| internal_err(e))?;
+    let original_height = original_height.map_err(|e| internal_err(e))?;
     let variants = get_variants_for_height(original_height);
     let available_resolutions: Vec<String> = variants.iter().map(|v| v.label.clone()).collect();
 
@@ -308,70 +314,135 @@ async fn encode_to_hls(input: &PathBuf, out_dir: &PathBuf) -> Result<()> {
         .unwrap_or_else(|_| "libx264".to_string());
     let gop = 48;
 
-    // Encode each variant
-    for variant in &variants {
-        let seg_dir = out_dir.join(&variant.label);
-        fs::create_dir_all(&seg_dir).await?;
-        let playlist_path = seg_dir.join("index.m3u8");
-        let segment_pattern = seg_dir.join("segment_%03d.ts");
+    // Limit concurrent FFmpeg processes (configurable via env, default 3)
+    let max_concurrent = std::env
+        ::var("MAX_CONCURRENT_ENCODES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(3);
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
-        info!("Encoding variant: {} at {}p with bitrate {}", variant.label, variant.height, variant.bitrate);
+    // Encode all variants in parallel
+    let input = Arc::new(input.clone());
+    let out_dir = Arc::new(out_dir.clone());
+    let video_codec = Arc::new(video_codec);
 
-        // Use scale filter with -1 to preserve aspect ratio
-        let scale_filter = format!("scale=-2:{}", variant.height);
+    let mut encode_tasks = Vec::new();
+    
+    for variant in variants.clone() {
+        let input = Arc::clone(&input);
+        let out_dir = Arc::clone(&out_dir);
+        let video_codec = Arc::clone(&video_codec);
+        let semaphore = Arc::clone(&semaphore);
+        
+        let task = tokio::task::spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
+            
+            let seg_dir = out_dir.join(&variant.label);
+            fs::create_dir_all(&seg_dir).await?;
+            let playlist_path = seg_dir.join("index.m3u8");
+            let segment_pattern = seg_dir.join("segment_%03d.ts");
 
-        let status = Command::new("ffmpeg")
-            .arg("-y")
-            .arg("-i")
-            .arg(input)
-            .arg("-c:v")
-            .arg(&video_codec)
-            .arg("-profile:v")
-            .arg("main")
-            .arg("-level:v")
-            .arg("4.0")
-            .arg("-preset")
-            .arg("veryfast")
-            .arg("-b:v")
-            .arg(&variant.bitrate)
-            .arg("-vf")
-            .arg(&scale_filter)
-            .arg("-pix_fmt")
-            .arg("yuv420p")
-            .arg("-g")
-            .arg(gop.to_string())
-            .arg("-keyint_min")
-            .arg(gop.to_string())
-            .arg("-sc_threshold")
-            .arg("0")
-            .arg("-force_key_frames")
-            .arg("expr:gte(t,n_forced*4)")
-            .arg("-c:a")
-            .arg("aac")
-            .arg("-b:a")
-            .arg("128k")
-            .arg("-ac")
-            .arg("2")
-            .arg("-hls_time")
-            .arg("4")
-            .arg("-hls_list_size")
-            .arg("0")
-            .arg("-hls_playlist_type")
-            .arg("vod")
-            .arg("-hls_segment_type")
-            .arg("mpegts")
-            .arg("-start_number")
-            .arg("0")
-            .arg("-hls_segment_filename")
-            .arg(&segment_pattern)
-            .arg(&playlist_path)
-            .status().await
-            .context("failed to run ffmpeg")?;
+            info!("Encoding variant: {} at {}p with bitrate {}", variant.label, variant.height, variant.bitrate);
 
-        if !status.success() {
-            anyhow::bail!("ffmpeg exited with status: {} for variant {}", status, variant.label);
-        }
+            let scale_filter = format!("scale=-2:{}", variant.height);
+
+            let status = Command::new("ffmpeg")
+                .arg("-y")
+                .arg("-i")
+                .arg(input.as_ref())
+                .arg("-c:v")
+                .arg(video_codec.as_ref())
+                .arg("-profile:v")
+                .arg("main")
+                .arg("-level:v")
+                .arg("4.0")
+                .arg("-preset")
+                .arg("veryfast")
+                .arg("-b:v")
+                .arg(&variant.bitrate)
+                .arg("-vf")
+                .arg(&scale_filter)
+                .arg("-pix_fmt")
+                .arg("yuv420p")
+                .arg("-g")
+                .arg(gop.to_string())
+                .arg("-keyint_min")
+                .arg(gop.to_string())
+                .arg("-sc_threshold")
+                .arg("0")
+                .arg("-force_key_frames")
+                .arg("expr:gte(t,n_forced*4)")
+                .arg("-c:a")
+                .arg("aac")
+                .arg("-b:a")
+                .arg("128k")
+                .arg("-ac")
+                .arg("2")
+                .arg("-hls_time")
+                .arg("4")
+                .arg("-hls_list_size")
+                .arg("0")
+                .arg("-hls_playlist_type")
+                .arg("vod")
+                .arg("-hls_segment_type")
+                .arg("mpegts")
+                .arg("-start_number")
+                .arg("0")
+                .arg("-hls_segment_filename")
+                .arg(&segment_pattern)
+                .arg(&playlist_path)
+                .status().await
+                .context("failed to run ffmpeg")?;
+
+            if !status.success() {
+                anyhow::bail!("ffmpeg exited with status: {} for variant {}", status, variant.label);
+            }
+            
+            Ok::<_, anyhow::Error>(())
+        });
+        
+        encode_tasks.push(task);
     }
+
+    // Spawn thumbnail generation in parallel with encoding
+    let input_thumb = Arc::clone(&input);
+    let out_dir_thumb = Arc::clone(&out_dir);
+    let thumb_task = tokio::task::spawn(async move {
+        let thumb_path = out_dir_thumb.join("thumbnail.jpg");
+        info!("Generating thumbnail: {:?}", thumb_path);
+        
+        let thumb_status = Command::new("ffmpeg")
+            .arg("-y")
+            .arg("-ss")
+            .arg("0")
+            .arg("-i")
+            .arg(input_thumb.as_ref())
+            .arg("-vframes")
+            .arg("1")
+            .arg("-q:v")
+            .arg("20")
+            .arg(&thumb_path)
+            .status().await
+            .context("failed to generate thumbnail")?;
+
+        if !thumb_status.success() {
+            error!("Thumbnail generation failed, but continuing...");
+        }
+        
+        Ok::<_, anyhow::Error>(())
+    });
+    
+    encode_tasks.push(thumb_task);
+
+    // Wait for all encoding and thumbnail tasks to complete
+    let results: Result<Vec<_>, _> = try_join_all(
+        encode_tasks.into_iter().map(|handle| async move {
+            handle.await.context("task panicked")?
+        })
+    ).await;
+    
+    results?;
 
     // Create master playlist
     let master_playlist_path = out_dir.join("index.m3u8");
@@ -391,39 +462,18 @@ async fn encode_to_hls(input: &PathBuf, out_dir: &PathBuf) -> Result<()> {
     fs::write(&master_playlist_path, master_content).await
         .context("failed to write master playlist")?;
 
-    // Generate thumbnail
-    let thumb_path = out_dir.join("thumbnail.jpg");
-    info!("Generating thumbnail: {:?}", thumb_path);
-    
-    let thumb_status = Command::new("ffmpeg")
-        .arg("-y")
-        .arg("-ss")
-        .arg("0")
-        .arg("-i")
-        .arg(input)
-        .arg("-vframes")
-        .arg("1")
-        .arg("-q:v")
-        .arg("20")
-        .arg(&thumb_path)
-        .status().await
-        .context("failed to generate thumbnail")?;
-
-    if !thumb_status.success() {
-        error!("Thumbnail generation failed, but continuing...");
-    }
-
     Ok(())
 }
 
 async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str) -> Result<String> {
     let mut master_playlist_key = None;
+    let mut files_to_upload = Vec::new();
 
-    // Recursive function to upload directory contents
-    async fn upload_dir_recursive(
-        state: &AppState,
+    // Collect all files to upload
+    async fn collect_files(
         dir: &PathBuf,
         prefix: &str,
+        files: &mut Vec<(PathBuf, String)>,
         master_key: &mut Option<String>
     ) -> Result<()> {
         let mut read_dir = fs::read_dir(dir).await.context("read dir")?;
@@ -433,9 +483,8 @@ async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str) -> 
             let file_name = entry.file_name().to_string_lossy().into_owned();
 
             if path.is_dir() {
-                // Recursively upload subdirectory
                 let sub_prefix = format!("{}{}/", prefix, file_name);
-                Box::pin(upload_dir_recursive(state, &path, &sub_prefix, master_key)).await?;
+                Box::pin(collect_files(&path, &sub_prefix, files, master_key)).await?;
             } else if path.is_file() {
                 let key = format!("{}{}", prefix, file_name);
 
@@ -444,8 +493,28 @@ async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str) -> 
                     *master_key = Some(key.clone());
                 }
 
+                files.push((path, key));
+            }
+        }
+
+        Ok(())
+    }
+
+    collect_files(hls_dir, prefix, &mut files_to_upload, &mut master_playlist_key).await?;
+
+    // Upload all files in parallel with concurrency limit
+    let max_concurrent_uploads = std::env
+        ::var("MAX_CONCURRENT_UPLOADS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(30);
+
+    let upload_results: Vec<Result<String>> = stream::iter(files_to_upload)
+        .map(|(path, key)| {
+            let state = state.clone();
+            async move {
                 let body_bytes = fs::read(&path).await
-                    .with_context(|| format!("read {}", file_name))?;
+                    .with_context(|| format!("read {:?}", path))?;
 
                 state.s3
                     .put_object()
@@ -456,13 +525,16 @@ async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str) -> 
                     .with_context(|| format!("upload {}", key))?;
 
                 info!("Uploaded: {}", key);
+                Ok::<_, anyhow::Error>(key)
             }
-        }
+        })
+        .buffer_unordered(max_concurrent_uploads)
+        .collect().await;
 
-        Ok(())
+    // Check for any upload errors
+    for result in upload_results {
+        result?;
     }
-
-    upload_dir_recursive(state, hls_dir, prefix, &mut master_playlist_key).await?;
 
     let playlist_key = master_playlist_key.ok_or_else(||
         anyhow::anyhow!("no master playlist (index.m3u8) generated")
