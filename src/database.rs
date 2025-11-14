@@ -1,17 +1,24 @@
-use anyhow::{ Context, Result };
-use sqlx::{ SqlitePool, migrate::MigrateDatabase, Sqlite };
+use anyhow::{Context, Result};
+use sqlx::{Sqlite, SqlitePool, migrate::MigrateDatabase};
 use tracing::info;
 
 pub async fn initialize_database(database_url: &str) -> Result<SqlitePool> {
     if !Sqlite::database_exists(database_url).await.unwrap_or(false) {
         info!("Creating database: {}", database_url);
-        Sqlite::create_database(database_url).await.context("Failed to create database")?;
+        Sqlite::create_database(database_url)
+            .await
+            .context("Failed to create database")?;
     }
 
-    let db_pool = SqlitePool::connect(database_url).await.context("Failed to connect to database")?;
+    let db_pool = SqlitePool::connect(database_url)
+        .await
+        .context("Failed to connect to database")?;
 
     // Run migrations
-    sqlx::migrate!("./migrations").run(&db_pool).await.context("Failed to run migrations")?;
+    sqlx::migrate!("./migrations")
+        .run(&db_pool)
+        .await
+        .context("Failed to run migrations")?;
 
     info!("Database initialized successfully");
 
@@ -26,7 +33,7 @@ pub async fn save_video(
     available_resolutions: &[String],
     duration: u32,
     thumbnail_key: &str,
-    entrypoint: &str
+    entrypoint: &str,
 ) -> Result<()> {
     let tags_json = serde_json::to_string(tags)?;
     let resolutions_json = serde_json::to_string(available_resolutions)?;
@@ -44,7 +51,10 @@ pub async fn save_video(
         .bind(entrypoint)
         .execute(db_pool).await?;
 
-    info!("Video saved to database: id={}, name={}", video_id, video_name);
+    info!(
+        "Video saved to database: id={}, name={}",
+        video_id, video_name
+    );
 
     Ok(())
 }

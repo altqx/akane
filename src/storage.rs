@@ -1,9 +1,9 @@
-use std::path::PathBuf;
-use anyhow::{ Context, Result };
-use tokio::fs;
-use futures::stream::{ self, StreamExt };
-use tracing::info;
 use crate::types::AppState;
+use anyhow::{Context, Result};
+use futures::stream::{self, StreamExt};
+use std::path::PathBuf;
+use tokio::fs;
+use tracing::info;
 
 pub async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str) -> Result<String> {
     let mut master_playlist_key = None;
@@ -14,7 +14,7 @@ pub async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str)
         dir: &PathBuf,
         prefix: &str,
         files: &mut Vec<(PathBuf, String)>,
-        master_key: &mut Option<String>
+        master_key: &mut Option<String>,
     ) -> Result<()> {
         let mut read_dir = fs::read_dir(dir).await.context("read dir")?;
 
@@ -40,28 +40,36 @@ pub async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str)
         Ok(())
     }
 
-    collect_files(hls_dir, prefix, &mut files_to_upload, &mut master_playlist_key).await?;
+    collect_files(
+        hls_dir,
+        prefix,
+        &mut files_to_upload,
+        &mut master_playlist_key,
+    )
+    .await?;
 
     // Upload all files in parallel with concurrency limit
-    let max_concurrent_uploads = std::env
-        ::var("MAX_CONCURRENT_UPLOADS")
+    let max_concurrent_uploads = std::env::var("MAX_CONCURRENT_UPLOADS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(30);
 
-    let upload_results: Vec<Result<String>> = stream
-        ::iter(files_to_upload)
+    let upload_results: Vec<Result<String>> = stream::iter(files_to_upload)
         .map(|(path, key)| {
             let state = state.clone();
             async move {
-                let body_bytes = fs::read(&path).await.with_context(|| format!("read {:?}", path))?;
+                let body_bytes = fs::read(&path)
+                    .await
+                    .with_context(|| format!("read {:?}", path))?;
 
-                state.s3
+                state
+                    .s3
                     .put_object()
                     .bucket(&state.bucket)
                     .key(&key)
                     .body(body_bytes.into())
-                    .send().await
+                    .send()
+                    .await
                     .with_context(|| format!("upload {}", key))?;
 
                 info!("Uploaded: {}", key);
@@ -69,16 +77,16 @@ pub async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str)
             }
         })
         .buffer_unordered(max_concurrent_uploads)
-        .collect().await;
+        .collect()
+        .await;
 
     // Check for any upload errors
     for result in upload_results {
         result?;
     }
 
-    let playlist_key = master_playlist_key.ok_or_else(||
-        anyhow::anyhow!("no master playlist (index.m3u8) generated")
-    )?;
+    let playlist_key = master_playlist_key
+        .ok_or_else(|| anyhow::anyhow!("no master playlist (index.m3u8) generated"))?;
 
     Ok(playlist_key)
 }

@@ -1,11 +1,11 @@
+use crate::types::{ProgressMap, ProgressUpdate, VideoVariant};
+use anyhow::{Context, Result};
+use futures::future::try_join_all;
 use std::path::PathBuf;
 use std::sync::Arc;
-use anyhow::{ Context, Result };
-use tokio::{ fs, process::Command };
-use futures::future::try_join_all;
 use tokio::sync::Semaphore;
+use tokio::{fs, process::Command};
 use tracing::info;
-use crate::types::{ VideoVariant, ProgressMap, ProgressUpdate };
 
 pub async fn get_video_height(input: &PathBuf) -> Result<u32> {
     let output = Command::new("ffprobe")
@@ -18,7 +18,8 @@ pub async fn get_video_height(input: &PathBuf) -> Result<u32> {
         .arg("-of")
         .arg("csv=p=0")
         .arg(input)
-        .output().await
+        .output()
+        .await
         .context("failed to run ffprobe")?;
 
     if !output.status.success() {
@@ -40,7 +41,8 @@ pub async fn get_video_duration(input: &PathBuf) -> Result<u32> {
         .arg("-of")
         .arg("csv=p=0")
         .arg(input)
-        .output().await
+        .output()
+        .await
         .context("failed to run ffprobe")?;
 
     if !output.status.success() {
@@ -48,17 +50,35 @@ pub async fn get_video_duration(input: &PathBuf) -> Result<u32> {
     }
 
     let duration_str = String::from_utf8(output.stdout)?.trim().to_string();
-    let duration: f64 = duration_str.parse().context("failed to parse video duration")?;
+    let duration: f64 = duration_str
+        .parse()
+        .context("failed to parse video duration")?;
 
     Ok(duration.round() as u32)
 }
 
 pub fn get_variants_for_height(original_height: u32) -> Vec<VideoVariant> {
     let all_variants = vec![
-        VideoVariant { label: "480p".to_string(), height: 480, bitrate: "1000k".to_string() },
-        VideoVariant { label: "720p".to_string(), height: 720, bitrate: "2500k".to_string() },
-        VideoVariant { label: "1080p".to_string(), height: 1080, bitrate: "5000k".to_string() },
-        VideoVariant { label: "1440p".to_string(), height: 1440, bitrate: "8000k".to_string() }
+        VideoVariant {
+            label: "480p".to_string(),
+            height: 480,
+            bitrate: "1000k".to_string(),
+        },
+        VideoVariant {
+            label: "720p".to_string(),
+            height: 720,
+            bitrate: "2500k".to_string(),
+        },
+        VideoVariant {
+            label: "1080p".to_string(),
+            height: 1080,
+            bitrate: "5000k".to_string(),
+        },
+        VideoVariant {
+            label: "1440p".to_string(),
+            height: 1440,
+            bitrate: "8000k".to_string(),
+        },
     ];
 
     // Only include variants at or below the original resolution
@@ -72,7 +92,7 @@ pub async fn encode_to_hls(
     input: &PathBuf,
     out_dir: &PathBuf,
     progress: &ProgressMap,
-    upload_id: &str
+    upload_id: &str,
 ) -> Result<()> {
     fs::create_dir_all(out_dir).await?;
 
@@ -88,8 +108,7 @@ pub async fn encode_to_hls(
     let gop = 48;
 
     // Limit concurrent FFmpeg processes (configurable via env, default 3)
-    let max_concurrent = std::env
-        ::var("MAX_CONCURRENT_ENCODES")
+    let max_concurrent = std::env::var("MAX_CONCURRENT_ENCODES")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(3);
@@ -124,9 +143,7 @@ pub async fn encode_to_hls(
 
             info!(
                 "Encoding variant: {} at {}p with bitrate {}",
-                variant.label,
-                variant.height,
-                variant.bitrate
+                variant.label, variant.height, variant.bitrate
             );
 
             let scale_filter = format!("scale=-2:{}", variant.height);
@@ -176,7 +193,8 @@ pub async fn encode_to_hls(
                 .arg("-hls_segment_filename")
                 .arg(&segment_pattern)
                 .arg(&playlist_path)
-                .status().await
+                .status()
+                .await
                 .context("failed to run ffmpeg")?;
 
             if !status.success() {
@@ -196,7 +214,10 @@ pub async fn encode_to_hls(
                 total_chunks: total_variants,
                 percentage,
             };
-            progress.write().await.insert(upload_id.clone(), updated_progress);
+            progress
+                .write()
+                .await
+                .insert(upload_id.clone(), updated_progress);
 
             Ok::<_, anyhow::Error>(())
         });
@@ -222,7 +243,8 @@ pub async fn encode_to_hls(
             .arg("-q:v")
             .arg("20")
             .arg(&thumb_path)
-            .status().await
+            .status()
+            .await
             .context("failed to generate thumbnail")?;
 
         if !thumb_status.success() {
@@ -236,8 +258,11 @@ pub async fn encode_to_hls(
 
     // Wait for all encoding and thumbnail tasks to complete
     let results: Result<Vec<_>, _> = try_join_all(
-        encode_tasks.into_iter().map(|handle| async move { handle.await.context("task panicked")? })
-    ).await;
+        encode_tasks
+            .into_iter()
+            .map(|handle| async move { handle.await.context("task panicked")? }),
+    )
+    .await;
 
     results?;
 
@@ -247,20 +272,23 @@ pub async fn encode_to_hls(
 
     let variants_ref = get_variants_for_height(get_video_height(input.as_ref()).await?);
     for variant in &variants_ref {
-        let bandwidth = variant.bitrate.trim_end_matches('k').parse::<u32>().unwrap_or(1000) * 1000;
-        master_content.push_str(
-            &format!(
-                "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{}\n",
-                bandwidth,
-                (((variant.height as f32) * 16.0) / 9.0) as u32, // Approximate width for display
-                variant.height
-            )
-        );
+        let bandwidth = variant
+            .bitrate
+            .trim_end_matches('k')
+            .parse::<u32>()
+            .unwrap_or(1000)
+            * 1000;
+        master_content.push_str(&format!(
+            "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{}\n",
+            bandwidth,
+            (((variant.height as f32) * 16.0) / 9.0) as u32, // Approximate width for display
+            variant.height
+        ));
         master_content.push_str(&format!("{}/index.m3u8\n", variant.label));
     }
 
-    fs
-        ::write(&master_playlist_path, master_content).await
+    fs::write(&master_playlist_path, master_content)
+        .await
         .context("failed to write master playlist")?;
 
     Ok(())
