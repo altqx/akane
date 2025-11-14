@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/upload", post(handlers::upload_video))
-        .route("/progress/:upload_id", get(handlers::get_progress))
+        .route("/progress/{upload_id}", get(handlers::get_progress))
         .fallback_service(ServeDir::new("public"))
         // e.g. 1 GB body limit
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
