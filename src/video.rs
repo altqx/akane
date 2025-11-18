@@ -106,6 +106,13 @@ pub async fn encode_to_hls(
 
     let video_codec = std::env::var("ENCODER").unwrap_or_else(|_| "libx264".to_string());
     let gop = 48;
+    
+    // Determine preset based on encoder
+    let preset = if video_codec.contains("nvenc") {
+        "p4" // p4 is medium preset for nvenc (p1=fastest, p7=slowest)
+    } else {
+        "veryfast" // libx264/libx265 preset
+    };
 
     // Limit concurrent FFmpeg processes (configurable via env, default 3)
     let max_concurrent = std::env::var("MAX_CONCURRENT_ENCODES")
@@ -118,6 +125,7 @@ pub async fn encode_to_hls(
     let input = Arc::new(input.clone());
     let out_dir = Arc::new(out_dir.clone());
     let video_codec = Arc::new(video_codec);
+    let preset = Arc::new(preset.to_string());
     let progress = Arc::new(progress.clone());
     let upload_id = upload_id.to_string();
 
@@ -128,6 +136,7 @@ pub async fn encode_to_hls(
         let input = Arc::clone(&input);
         let out_dir = Arc::clone(&out_dir);
         let video_codec = Arc::clone(&video_codec);
+        let preset = Arc::clone(&preset);
         let semaphore = Arc::clone(&semaphore);
         let progress = Arc::clone(&progress);
         let upload_id = upload_id.clone();
@@ -148,18 +157,21 @@ pub async fn encode_to_hls(
 
             let scale_filter = format!("scale=-2:{}", variant.height);
 
-            let status = Command::new("ffmpeg")
-                .arg("-y")
+            let mut cmd = Command::new("ffmpeg");
+            cmd.arg("-y")
                 .arg("-i")
                 .arg(input.as_ref())
                 .arg("-c:v")
-                .arg(video_codec.as_ref())
-                .arg("-profile:v")
-                .arg("main")
-                .arg("-level:v")
-                .arg("4.0")
-                .arg("-preset")
-                .arg("veryfast")
+                .arg(video_codec.as_ref());
+
+            // Add profile and level only for software encoders
+            if !video_codec.contains("nvenc") && !video_codec.contains("_qsv") && !video_codec.contains("_amf") {
+                cmd.arg("-profile:v").arg("main")
+                   .arg("-level:v").arg("4.0");
+            }
+
+            cmd.arg("-preset")
+                .arg(preset.as_ref())
                 .arg("-b:v")
                 .arg(&variant.bitrate)
                 .arg("-vf")
@@ -179,8 +191,13 @@ pub async fn encode_to_hls(
                 .arg("-b:a")
                 .arg("128k")
                 .arg("-ac")
-                .arg("2")
-                .arg("-hls_time")
+                .arg("2");
+
+            // Map all subtitle streams and convert to WebVTT
+            cmd.arg("-c:s")
+                .arg("webvtt");
+
+            cmd.arg("-hls_time")
                 .arg("4")
                 .arg("-hls_list_size")
                 .arg("0")
@@ -192,8 +209,9 @@ pub async fn encode_to_hls(
                 .arg("0")
                 .arg("-hls_segment_filename")
                 .arg(&segment_pattern)
-                .arg(&playlist_path)
-                .status()
+                .arg(&playlist_path);
+
+            let status = cmd.status()
                 .await
                 .context("failed to run ffmpeg")?;
 
@@ -270,7 +288,35 @@ pub async fn encode_to_hls(
     let master_playlist_path = out_dir.join("index.m3u8");
     let mut master_content = String::from("#EXTM3U\n#EXT-X-VERSION:3\n");
 
+    // Check if any variant has subtitle files
+    let mut has_subtitles = false;
     let variants_ref = get_variants_for_height(get_video_height(input.as_ref()).await?);
+    
+    for variant in &variants_ref {
+        let subtitle_playlist = out_dir.join(&variant.label).join("index_vtt.m3u8");
+        if subtitle_playlist.exists() {
+            has_subtitles = true;
+            break;
+        }
+    }
+
+    // Add subtitle media group if subtitles exist
+    if has_subtitles {
+        // Add subtitle reference for each variant that has subtitles
+        for variant in &variants_ref {
+            let subtitle_playlist = out_dir.join(&variant.label).join("index_vtt.m3u8");
+            if subtitle_playlist.exists() {
+                master_content.push_str(&format!(
+                    "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"{}\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,LANGUAGE=\"en\",URI=\"{}/index_vtt.m3u8\"\n",
+                    variant.label,
+                    variant.label
+                ));
+            }
+        }
+        master_content.push_str("\n");
+    }
+
+    // Add video stream variants
     for variant in &variants_ref {
         let bandwidth = variant
             .bitrate
@@ -278,12 +324,24 @@ pub async fn encode_to_hls(
             .parse::<u32>()
             .unwrap_or(1000)
             * 1000;
-        master_content.push_str(&format!(
-            "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{}\n",
-            bandwidth,
-            (((variant.height as f32) * 16.0) / 9.0) as u32, // Approximate width for display
-            variant.height
-        ));
+        
+        let stream_inf = if has_subtitles {
+            format!(
+                "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{},SUBTITLES=\"subs\"\n",
+                bandwidth,
+                (((variant.height as f32) * 16.0) / 9.0) as u32,
+                variant.height
+            )
+        } else {
+            format!(
+                "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{}\n",
+                bandwidth,
+                (((variant.height as f32) * 16.0) / 9.0) as u32,
+                variant.height
+            )
+        };
+        
+        master_content.push_str(&stream_inf);
         master_content.push_str(&format!("{}/index.m3u8\n", variant.label));
     }
 

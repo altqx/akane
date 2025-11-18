@@ -1,10 +1,11 @@
-use crate::database::save_video;
+use crate::database::{save_video, count_videos, list_videos as db_list_videos};
 use crate::storage::upload_hls_to_r2;
-use crate::types::{AppState, ProgressResponse, ProgressUpdate, UploadResponse};
+use crate::types::{AppState, ProgressResponse, ProgressUpdate, UploadResponse, VideoListResponse, VideoQuery};
 use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, get_video_height};
 use axum::{
     Json,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, State, Query},
+    http::StatusCode,
 };
 use std::path::PathBuf;
 use tokio::{fs, io::AsyncWriteExt};
@@ -211,6 +212,52 @@ pub async fn get_progress(
     }))
 }
 
+pub async fn list_videos(
+    State(state): State<AppState>,
+    Query(query): Query<VideoQuery>,
+) -> Result<Json<VideoListResponse>, (StatusCode, String)> {
+    // Normalize page and page_size with defaults and limits
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
+
+    let filters = VideoQuery {
+        page: Some(page),
+        page_size: Some(page_size),
+        name: query.name.clone(),
+        tag: query.tag.clone(),
+    };
+
+    let total = count_videos(&state.db_pool, &filters)
+        .await
+        .map_err(|e| internal_err(e))?;
+
+    let items = db_list_videos(
+        &state.db_pool,
+        &filters,
+        page,
+        page_size,
+        &state.public_base_url,
+    )
+    .await
+    .map_err(|e| internal_err(e))?;
+
+    let total_u64 = total as u64;
+    let page_u64 = page as u64;
+    let page_size_u64 = page_size as u64;
+
+    let has_prev = page > 1;
+    let has_next = page_u64 * page_size_u64 < total_u64;
+
+    Ok(Json(VideoListResponse {
+        items,
+        page,
+        page_size,
+        total: total_u64,
+        has_next,
+        has_prev,
+    }))
+}
+ 
 fn internal_err(e: anyhow::Error) -> (axum::http::StatusCode, String) {
     error!(error = ?e, "internal error");
     (
