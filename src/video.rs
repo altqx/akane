@@ -231,6 +231,10 @@ pub async fn encode_to_hls(
                 current_chunk,
                 total_chunks: total_variants,
                 percentage,
+                details: Some(format!("Encoded variant: {}", variant.label)),
+                status: "processing".to_string(),
+                result: None,
+                error: None,
             };
             progress
                 .write()

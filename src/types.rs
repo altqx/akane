@@ -11,6 +11,10 @@ pub struct ProgressUpdate {
     pub current_chunk: u32,
     pub total_chunks: u32,
     pub percentage: u32,
+    pub details: Option<String>,
+    pub status: String, // "processing", "completed", "failed"
+    pub result: Option<UploadResponse>,
+    pub error: Option<String>,
 }
 
 pub type ProgressMap = Arc<RwLock<HashMap<String, ProgressUpdate>>>;
@@ -34,10 +38,16 @@ pub struct AppState {
     pub active_viewers: Arc<RwLock<HashMap<String, HashMap<String, std::time::Instant>>>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 pub struct UploadResponse {
     pub player_url: String,
     pub upload_id: String,
+}
+
+#[derive(Serialize)]
+pub struct UploadAccepted {
+    pub upload_id: String,
+    pub message: String,
 }
 
 #[derive(Serialize)]
@@ -46,6 +56,10 @@ pub struct ProgressResponse {
     pub current_chunk: u32,
     pub total_chunks: u32,
     pub percentage: u32,
+    pub details: Option<String>,
+    pub status: String,
+    pub result: Option<UploadResponse>,
+    pub error: Option<String>,
 }
 
 #[derive(Deserialize)]

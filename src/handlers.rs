@@ -1,9 +1,12 @@
 use crate::database::{count_videos, list_videos as db_list_videos, save_video};
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
-    AppState, ProgressResponse, ProgressUpdate, UploadResponse, VideoListResponse, VideoQuery,
+    AppState, ProgressResponse, ProgressUpdate, UploadAccepted, UploadResponse, VideoListResponse,
+    VideoQuery,
 };
-use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, get_video_height};
+use crate::video::{
+    encode_to_hls, get_variants_for_height, get_video_duration, get_video_height,
+};
 // use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use axum::{
     Json,
@@ -28,12 +31,19 @@ pub async fn upload_video(
     State(state): State<AppState>,
     headers: HeaderMap,
     mut multipart: Multipart,
-) -> Result<Json<UploadResponse>, (axum::http::StatusCode, String)> {
+) -> Result<Json<UploadAccepted>, (axum::http::StatusCode, String)> {
     let mut video_path: Option<PathBuf> = None;
     let mut video_name: Option<String> = None;
     let mut tags: Vec<String> = Vec::new();
 
-    while let Some(field) = multipart
+    // Create a unique upload ID for progress tracking, or use provided one
+    let upload_id = headers
+        .get("X-Upload-ID")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| internal_err(anyhow::anyhow!(e)))?
@@ -54,14 +64,36 @@ pub async fn upload_video(
                     .await
                     .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
 
-                let mut bytes = field
-                    .bytes()
+                // Stream the file to disk and update progress
+                let mut total_bytes = 0;
+                while let Some(chunk) = field
+                    .chunk()
                     .await
-                    .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+                    .map_err(|e| internal_err(anyhow::anyhow!(e)))?
+                {
+                    total_bytes += chunk.len();
+                    file.write_all(&chunk)
+                        .await
+                        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
 
-                file.write_all_buf(&mut bytes)
-                    .await
-                    .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+                    if !upload_id.is_empty() {
+                        let progress_update = ProgressUpdate {
+                            stage: "Uploading to server".to_string(),
+                            current_chunk: 0,
+                            total_chunks: 1,
+                            percentage: 0,
+                            details: Some(format!("Uploaded {} bytes", total_bytes)),
+                            status: "processing".to_string(),
+                            result: None,
+                            error: None,
+                        };
+                        state
+                            .progress
+                            .write()
+                            .await
+                            .insert(upload_id.clone(), progress_update);
+                    }
+                }
 
                 video_path = Some(tmp_file);
             }
@@ -108,19 +140,16 @@ pub async fn upload_video(
         )
     })?;
 
-    // Create a unique upload ID for progress tracking, or use provided one
-    let upload_id = headers
-        .get("X-Upload-ID")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-
     // Initialize progress
     let initial_progress = ProgressUpdate {
-        stage: "Uploading to server".to_string(),
+        stage: "Queued for processing".to_string(),
         current_chunk: 0,
         total_chunks: 1,
         percentage: 0,
+        details: None,
+        status: "processing".to_string(),
+        result: None,
+        error: None,
     };
     state
         .progress
@@ -128,102 +157,198 @@ pub async fn upload_video(
         .await
         .insert(upload_id.clone(), initial_progress);
 
-    // Encode to HLS (playlist + segments) into a temp directory
-    let output_id = Uuid::new_v4().to_string();
-    let hls_dir = std::env::temp_dir().join(format!("hls-{}", &output_id));
-    fs::create_dir_all(&hls_dir)
-        .await
-        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+    // Spawn background task for processing
+    let state_clone = state.clone();
+    let upload_id_clone = upload_id.clone();
+    let video_path_clone = video_path.clone();
+    let video_name_clone = video_name.clone();
+    let tags_clone = tags.clone();
 
-    // Get video metadata before encoding (parallel)
-    let (video_duration, original_height) = tokio::join!(
-        get_video_duration(&video_path),
-        get_video_height(&video_path)
-    );
-    let video_duration = video_duration.map_err(|e| internal_err(e))?;
-    let original_height = original_height.map_err(|e| internal_err(e))?;
-    let variants = get_variants_for_height(original_height);
-    let available_resolutions: Vec<String> = variants.iter().map(|v| v.label.clone()).collect();
+    tokio::spawn(async move {
+        let result = async {
+            // Encode to HLS (playlist + segments) into a temp directory
+            let output_id = Uuid::new_v4().to_string();
+            let hls_dir = std::env::temp_dir().join(format!("hls-{}", &output_id));
+            fs::create_dir_all(&hls_dir)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
 
-    // Update progress: FFmpeg processing stage
-    let encoding_progress = ProgressUpdate {
-        stage: "FFmpeg processing".to_string(),
-        current_chunk: 0,
-        total_chunks: variants.len() as u32,
-        percentage: 0,
-    };
-    state
-        .progress
-        .write()
-        .await
-        .insert(upload_id.clone(), encoding_progress);
+            // Get video metadata before encoding (parallel)
+            let (video_duration, original_height) = tokio::join!(
+                get_video_duration(&video_path_clone),
+                get_video_height(&video_path_clone)
+            );
+            let video_duration = video_duration?;
+            let original_height = original_height?;
+            let variants = get_variants_for_height(original_height);
+            let available_resolutions: Vec<String> =
+                variants.iter().map(|v| v.label.clone()).collect();
 
-    encode_to_hls(&video_path, &hls_dir, &state.progress, &upload_id)
-        .await
-        .map_err(|e| internal_err(e))?;
+            // Update progress: FFmpeg processing stage
+            let encoding_progress = ProgressUpdate {
+                stage: "FFmpeg processing".to_string(),
+                current_chunk: 0,
+                total_chunks: variants.len() as u32,
+                percentage: 0,
+                details: Some("Starting encoding...".to_string()),
+                status: "processing".to_string(),
+                result: None,
+                error: None,
+            };
+            state_clone
+                .progress
+                .write()
+                .await
+                .insert(upload_id_clone.clone(), encoding_progress);
 
-    // Update progress: Upload to R2 stage
-    let upload_progress = ProgressUpdate {
-        stage: "Upload to R2".to_string(),
-        current_chunk: 0,
-        total_chunks: 1,
-        percentage: 0,
-    };
-    state
-        .progress
-        .write()
-        .await
-        .insert(upload_id.clone(), upload_progress);
+            encode_to_hls(
+                &video_path_clone,
+                &hls_dir,
+                &state_clone.progress,
+                &upload_id_clone,
+            )
+            .await?;
 
-    // Upload HLS to R2
-    let prefix = format!("{}/", output_id);
-    // Build public URL (pointing to our proxy)
-    let playlist_key = upload_hls_to_r2(&state, &hls_dir, &prefix)
-        .await
-        .map_err(|e| internal_err(e))?;
+            // Update progress: Upload to R2 stage
+            let upload_progress = ProgressUpdate {
+                stage: "Upload to R2".to_string(),
+                current_chunk: 0,
+                total_chunks: 1,
+                percentage: 0,
+                details: Some("Uploading segments to storage...".to_string()),
+                status: "processing".to_string(),
+                result: None,
+                error: None,
+            };
+            state_clone
+                .progress
+                .write()
+                .await
+                .insert(upload_id_clone.clone(), upload_progress);
 
-    // Save to database
-    let thumbnail_key = format!("{}/thumbnail.jpg", output_id);
-    let entrypoint = playlist_key.clone();
+            // Upload HLS to R2
+            let prefix = format!("{}/", output_id);
+            // Build public URL (pointing to our proxy)
+            let playlist_key = upload_hls_to_r2(&state_clone, &hls_dir, &prefix).await?;
 
-    save_video(
-        &state.db_pool,
-        &output_id,
-        &video_name,
-        &tags,
-        &available_resolutions,
-        video_duration,
-        &thumbnail_key,
-        &entrypoint,
-    )
-    .await
-    .map_err(|e| internal_err(e))?;
+            // Save to database
+            let thumbnail_key = format!("{}/thumbnail.jpg", output_id);
+            let entrypoint = playlist_key.clone();
 
-    // Cleanup (ignore errors)
-    let _ = fs::remove_file(&video_path).await;
-    let _ = fs::remove_dir_all(&hls_dir).await;
+            save_video(
+                &state_clone.db_pool,
+                &output_id,
+                &video_name_clone,
+                &tags_clone,
+                &available_resolutions,
+                video_duration,
+                &thumbnail_key,
+                &entrypoint,
+            )
+            .await?;
 
-    // Return player URL
-    let player_url = format!("/player/{}", output_id);
+            // Cleanup (ignore errors)
+            let _ = fs::remove_file(&video_path_clone).await;
+            let _ = fs::remove_dir_all(&hls_dir).await;
 
-    Ok(Json(UploadResponse {
-        player_url,
+            // Return player URL
+            let player_url = format!("/player/{}", output_id);
+            Ok::<_, anyhow::Error>(UploadResponse {
+                player_url,
+                upload_id: upload_id_clone.clone(),
+            })
+        }
+        .await;
+
+        match result {
+            Ok(response) => {
+                let completion_progress = ProgressUpdate {
+                    stage: "Completed".to_string(),
+                    current_chunk: 1,
+                    total_chunks: 1,
+                    percentage: 100,
+                    details: Some("Upload and processing complete".to_string()),
+                    status: "completed".to_string(),
+                    result: Some(response),
+                    error: None,
+                };
+                state_clone
+                    .progress
+                    .write()
+                    .await
+                    .insert(upload_id_clone, completion_progress);
+            }
+            Err(e) => {
+                error!("Background processing failed: {:?}", e);
+                let error_progress = ProgressUpdate {
+                    stage: "Failed".to_string(),
+                    current_chunk: 0,
+                    total_chunks: 1,
+                    percentage: 0,
+                    details: Some(format!("Processing failed: {}", e)),
+                    status: "failed".to_string(),
+                    result: None,
+                    error: Some(e.to_string()),
+                };
+                state_clone
+                    .progress
+                    .write()
+                    .await
+                    .insert(upload_id_clone, error_progress);
+            }
+        }
+    });
+
+    Ok(Json(UploadAccepted {
         upload_id,
+        message: "File uploaded successfully, processing started in background".to_string(),
     }))
 }
 
 pub async fn get_progress(
     State(state): State<AppState>,
     Path(upload_id): Path<String>,
-) -> Json<Option<ProgressResponse>> {
-    let progress_map = state.progress.read().await;
-    let progress = progress_map.get(&upload_id).cloned();
-    Json(progress.map(|p| ProgressResponse {
-        stage: p.stage,
-        current_chunk: p.current_chunk,
-        total_chunks: p.total_chunks,
-        percentage: p.percentage,
-    }))
+) -> Sse<impl Stream<Item = Result<Event, anyhow::Error>> + Send> {
+    let stream = async_stream::stream! {
+        loop {
+            let progress = {
+                let progress_map = state.progress.read().await;
+                progress_map.get(&upload_id).cloned()
+            };
+
+            if let Some(p) = progress {
+                // Only yield if changed or every few seconds to keep alive
+                let json = serde_json::to_string(&ProgressResponse {
+                    stage: p.stage.clone(),
+                    current_chunk: p.current_chunk,
+                    total_chunks: p.total_chunks,
+                    percentage: p.percentage,
+                    details: p.details.clone(),
+                    status: p.status.clone(),
+                    result: p.result.clone(),
+                    error: p.error.clone(),
+                })
+                .unwrap_or_default();
+
+                yield Ok(Event::default().data(json));
+
+                if p.status == "completed" || p.status == "failed" {
+                    break;
+                }
+            } else {
+                // If not found, maybe it's done or invalid.
+                // For now, we can yield an error or just break.
+                // Let's assume if it's not found it might be finished or not started.
+                // But usually it should be there. 
+                yield Ok(Event::default().event("error").data("Upload ID not found"));
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
 pub async fn list_videos(
@@ -299,25 +424,6 @@ pub async fn heartbeat(
         video_viewers.insert(viewer_id, std::time::Instant::now());
     }
 
-    // Increment view count in database (debounced or just on every heartbeat?
-    // Ideally, we should only count "new" views. For now, let's count every heartbeat as a "view minute"
-    // or just count unique sessions.
-    // A better approach for view counting:
-    // Only increment if this session hasn't been seen in the last X minutes.
-    // For simplicity in this iteration, we will just log the heartbeat in the `views` table
-    // and let the `increment_view_count` handle the logic.
-    // Actually, `increment_view_count` adds a row every time. This might be too much data.
-    // Let's only call `increment_view_count` if it's a "new" view session.
-    // But for now, let's just update the active viewers map.
-    // The `views` table insertion should probably happen on page load (get_player) or first heartbeat.
-    // Let's do it on first heartbeat for a session.
-
-    // For this task, let's just keep it simple:
-    // The `views` table tracks "hits".
-    // We can call `increment_view_count` here, but maybe limit it?
-    // Let's call it on `get_player` instead for the "view count" increment.
-    // And use heartbeat ONLY for "active viewers".
-
     StatusCode::OK
 }
 
@@ -359,6 +465,38 @@ pub async fn get_analytics_history(
         .await
         .map_err(|e| internal_err(e))?;
     Ok(Json(history))
+}
+
+#[derive(serde::Serialize)]
+pub struct AnalyticsVideoDto {
+    pub id: String,
+    pub name: String,
+    pub view_count: i64,
+    pub created_at: String,
+    pub thumbnail_url: String,
+}
+
+pub async fn get_analytics_videos(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<AnalyticsVideoDto>>, (StatusCode, String)> {
+    let videos = crate::database::get_all_videos_summary(&state.db_pool)
+        .await
+        .map_err(|e| internal_err(e))?;
+
+    let base = state.public_base_url.trim_end_matches('/');
+
+    let dtos = videos
+        .into_iter()
+        .map(|v| AnalyticsVideoDto {
+            id: v.id,
+            name: v.name,
+            view_count: v.view_count,
+            created_at: v.created_at,
+            thumbnail_url: format!("{}/{}", base, v.thumbnail_key),
+        })
+        .collect();
+
+    Ok(Json(dtos))
 }
 
 fn internal_err(e: anyhow::Error) -> (axum::http::StatusCode, String) {

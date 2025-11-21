@@ -267,3 +267,24 @@ pub async fn get_analytics_history(db_pool: &SqlitePool) -> Result<Vec<ViewHisto
 
     Ok(rows)
 }
+
+#[derive(sqlx::FromRow, serde::Serialize)]
+pub struct VideoSummary {
+    pub id: String,
+    pub name: String,
+    pub view_count: i64,
+    pub created_at: String,
+    pub thumbnail_key: String,
+}
+
+pub async fn get_all_videos_summary(db_pool: &SqlitePool) -> Result<Vec<VideoSummary>> {
+    let rows = sqlx::query_as::<_, VideoSummary>(
+        "SELECT id, name, view_count, created_at, thumbnail_key \
+         FROM videos \
+         ORDER BY datetime(created_at) DESC",
+    )
+    .fetch_all(db_pool)
+    .await?;
+
+    Ok(rows)
+}

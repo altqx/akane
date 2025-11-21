@@ -6,7 +6,7 @@ export interface UploadResult {
   file: string
   success: boolean
   data?: {
-    playlist_url: string
+    player_url: string
     upload_id: string
   }
   error?: string
@@ -17,6 +17,13 @@ export interface ProgressData {
   stage: string
   current_chunk: number
   total_chunks: number
+  details?: string
+  status?: string
+  result?: {
+    player_url: string
+    upload_id: string
+  }
+  error?: string
 }
 
 interface UploadContextType {
@@ -49,24 +56,6 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   // but since we are using state in the loop (reading files[i]), it should be fine as long as files doesn't change during upload.
   // However, to be safe and avoid stale closures if we were to use effects, we'll just use the state directly in the function.
 
-  const pollProgress = async (uploadId: string) => {
-    try {
-      const token = localStorage.getItem('admin_token')
-      const res = await fetch(`/api/progress/${uploadId}`, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      })
-      if (!res.ok) return
-      const data = await res.json()
-      if (data) {
-        setProgress(data)
-      }
-    } catch (err) {
-      console.error('Progress poll error:', err)
-    }
-  }
-
   const startUpload = async () => {
     if (files.length === 0) {
       setError('Please select at least one video file.')
@@ -78,22 +67,44 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     setError(null)
 
     const newResults: UploadResult[] = []
-
-    // We iterate over a copy of the files array to ensure stability
     const filesToUpload = [...files]
 
     for (let i = 0; i < filesToUpload.length; i++) {
       const file = filesToUpload[i]
-      setUploadStatus(`Uploading ${i + 1} of ${filesToUpload.length}: ${file.name}`)
+      setUploadStatus(`Processing ${i + 1} of ${filesToUpload.length}: ${file.name}`)
       setProgress(null)
 
-      // Generate a client-side ID for progress tracking
       const uploadId = crypto.randomUUID()
+      const token = localStorage.getItem('admin_token')
 
-      // Start polling immediately
-      const pollInterval = setInterval(() => {
-        pollProgress(uploadId)
-      }, 500)
+      // Create a promise that resolves when processing is complete
+      const processingPromise = new Promise<{ player_url: string; upload_id: string }>((resolve, reject) => {
+        const eventSource = new EventSource(`/api/progress/${uploadId}`)
+        
+        eventSource.onmessage = (event) => {
+          try {
+            const data: ProgressData = JSON.parse(event.data)
+            setProgress(data)
+
+            if (data.status === 'completed' && data.result) {
+              eventSource.close()
+              resolve(data.result)
+            } else if (data.status === 'failed') {
+              eventSource.close()
+              reject(new Error(data.error || 'Processing failed'))
+            }
+          } catch (e) {
+            console.error('Failed to parse progress data', e)
+          }
+        }
+
+        eventSource.onerror = () => {
+          // If connection drops, we might want to retry or just wait.
+          // For now, if it's a hard error, we might reject, but SSE often reconnects.
+          // Let's rely on the backend sending a final status.
+          // However, if we never get a connection, we should timeout.
+        }
+      })
 
       try {
         const formData = new FormData()
@@ -103,23 +114,54 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           formData.append('tags', tags.trim())
         }
 
-        // Start upload request with X-Upload-ID header
-        const token = localStorage.getItem('admin_token')
-        const res = await fetch('/api/upload', {
-          method: 'POST',
-          headers: {
-            'X-Upload-ID': uploadId,
-            Authorization: `Bearer ${token}`
-          },
-          body: formData
+        // Use XMLHttpRequest for upload progress
+        const xhr = new XMLHttpRequest()
+        
+        const uploadPromise = new Promise<void>((resolve, reject) => {
+          xhr.upload.addEventListener('progress', (event) => {
+            if (event.lengthComputable) {
+              const percentComplete = (event.loaded / event.total) * 100
+              setProgress(prev => {
+                // Only update if we are still in the uploading stage (or haven't started processing)
+                if (!prev || prev.stage === 'Uploading to server') {
+                  return {
+                    stage: 'Uploading to server',
+                    percentage: Math.round(percentComplete),
+                    current_chunk: 0,
+                    total_chunks: 1,
+                    details: `Uploaded ${(event.loaded / 1024 / 1024).toFixed(2)} MB`,
+                    status: 'uploading'
+                  }
+                }
+                return prev
+              })
+            }
+          })
+
+          xhr.addEventListener('load', () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve()
+            } else {
+              reject(new Error(xhr.responseText || 'Upload failed'))
+            }
+          })
+
+          xhr.addEventListener('error', () => reject(new Error('Network error')))
+          xhr.addEventListener('abort', () => reject(new Error('Upload aborted')))
+
+          xhr.open('POST', '/api/upload')
+          xhr.setRequestHeader('X-Upload-ID', uploadId)
+          if (token) {
+            xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+          }
+          xhr.send(formData)
         })
 
-        if (!res.ok) {
-          const text = await res.text()
-          throw new Error(text || 'Upload failed')
-        }
-
-        const data = await res.json()
+        // Wait for upload to finish
+        await uploadPromise
+        
+        // Wait for processing to finish
+        const data = await processingPromise
 
         const result = {
           file: file.name,
@@ -128,7 +170,6 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         }
 
         newResults.push(result)
-        // Update results state progressively so user sees success as they happen
         setResults([...newResults])
       } catch (err: unknown) {
         const errorMessage = err instanceof Error ? err.message : String(err)
@@ -139,8 +180,6 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         }
         newResults.push(result)
         setResults([...newResults])
-      } finally {
-        clearInterval(pollInterval)
       }
     }
 
