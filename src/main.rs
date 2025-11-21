@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
 
     axum::serve(
         tokio::net::TcpListener::bind(addr).await?,
-        app.into_make_service(),
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
     .context("server error")?;
