@@ -25,6 +25,14 @@ export default function Navbar() {
         >
           Videos
         </Link>
+        <Link
+          href='/analytics'
+          className={`text-sm font-medium transition-colors hover:text-primary ${
+            isActive('/analytics') ? 'text-primary' : 'text-muted-foreground'
+          }`}
+        >
+          Analytics
+        </Link>
       </div>
     </nav>
   )

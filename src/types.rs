@@ -31,6 +31,7 @@ pub struct AppState {
     pub progress: ProgressMap,
     pub secret_key: String,
     pub admin_password: String,
+    pub active_viewers: Arc<RwLock<HashMap<String, HashMap<String, std::time::Instant>>>>,
 }
 
 #[derive(Serialize)]
@@ -64,6 +65,7 @@ pub struct VideoDto {
     pub duration: u32,
     pub thumbnail_url: String,
     pub player_url: String,
+    pub view_count: i64,
     pub created_at: String,
 }
 

@@ -69,6 +69,7 @@ struct VideoRow {
     duration: i64,
     thumbnail_key: String,
     entrypoint: String,
+    view_count: i64,
     created_at: String,
 }
 
@@ -133,7 +134,7 @@ pub async fn list_videos(
     let rows: Vec<VideoRow> = match (name.as_ref(), tag) {
          (None, None) => {
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
+                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, view_count, created_at \
                   FROM videos \
                   ORDER BY datetime(created_at) DESC \
                   LIMIT ? OFFSET ?",
@@ -146,7 +147,7 @@ pub async fn list_videos(
          (Some(name), None) => {
              let pattern = format!("%{}%", name);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
+                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, view_count, created_at \
                   FROM videos \
                   WHERE LOWER(name) LIKE ? \
                   ORDER BY datetime(created_at) DESC \
@@ -161,7 +162,7 @@ pub async fn list_videos(
          (None, Some(tag)) => {
              let pattern = format!("%{}%", tag);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
+                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, view_count, created_at \
                   FROM videos \
                   WHERE tags LIKE ? \
                   ORDER BY datetime(created_at) DESC \
@@ -177,7 +178,7 @@ pub async fn list_videos(
              let name_pattern = format!("%{}%", name);
              let tag_pattern = format!("%{}%", tag);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
+                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, view_count, created_at \
                   FROM videos \
                   WHERE LOWER(name) LIKE ? AND tags LIKE ? \
                   ORDER BY datetime(created_at) DESC \
@@ -212,9 +213,57 @@ pub async fn list_videos(
             duration: row.duration as u32,
             thumbnail_url,
             player_url,
+            view_count: row.view_count,
             created_at: row.created_at,
         });
     }
 
     Ok(result)
+}
+
+pub async fn increment_view_count(
+    db_pool: &SqlitePool,
+    video_id: &str,
+    ip: &str,
+    user_agent: &str,
+) -> Result<()> {
+    let mut tx = db_pool.begin().await?;
+
+    // Increment view count in videos table
+    sqlx::query("UPDATE videos SET view_count = view_count + 1 WHERE id = ?")
+        .bind(video_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Record view in views table
+    sqlx::query("INSERT INTO views (video_id, ip_address, user_agent) VALUES (?, ?, ?)")
+        .bind(video_id)
+        .bind(ip)
+        .bind(user_agent)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    Ok(())
+}
+
+#[derive(sqlx::FromRow, serde::Serialize)]
+pub struct ViewHistoryItem {
+    pub date: String,
+    pub count: i64,
+}
+
+pub async fn get_analytics_history(db_pool: &SqlitePool) -> Result<Vec<ViewHistoryItem>> {
+    let rows = sqlx::query_as::<_, ViewHistoryItem>(
+        "SELECT date(created_at) as date, COUNT(*) as count \
+         FROM views \
+         GROUP BY date(created_at) \
+         ORDER BY date(created_at) DESC \
+         LIMIT 30",
+    )
+    .fetch_all(db_pool)
+    .await?;
+
+    Ok(rows)
 }

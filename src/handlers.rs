@@ -8,12 +8,18 @@ use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, g
 use axum::{
     Json,
     extract::{ConnectInfo, Multipart, Path, Query, State},
-    http::{StatusCode, header, HeaderMap},
-    response::{Html, IntoResponse, Response},
+    http::{HeaderMap, StatusCode, header},
+    response::{
+        Html, IntoResponse, Response,
+        sse::{Event, Sse},
+    },
 };
+use futures::stream::Stream;
 use minify_js::{Session, TopLevelMode, minify};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::{fs, io::AsyncWriteExt};
 use tracing::error;
 use uuid::Uuid;
@@ -266,6 +272,95 @@ pub async fn list_videos(
     }))
 }
 
+pub async fn heartbeat(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(video_id): Path<String>,
+) -> StatusCode {
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| addr.ip().to_string());
+
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+
+    // Update active viewers in memory
+    {
+        let mut viewers = state.active_viewers.write().await;
+        let video_viewers = viewers.entry(video_id.clone()).or_default();
+        // Use IP + UserAgent as a simple unique identifier for now
+        let viewer_id = format!("{}-{}", ip, user_agent);
+        video_viewers.insert(viewer_id, std::time::Instant::now());
+    }
+
+    // Increment view count in database (debounced or just on every heartbeat?
+    // Ideally, we should only count "new" views. For now, let's count every heartbeat as a "view minute"
+    // or just count unique sessions.
+    // A better approach for view counting:
+    // Only increment if this session hasn't been seen in the last X minutes.
+    // For simplicity in this iteration, we will just log the heartbeat in the `views` table
+    // and let the `increment_view_count` handle the logic.
+    // Actually, `increment_view_count` adds a row every time. This might be too much data.
+    // Let's only call `increment_view_count` if it's a "new" view session.
+    // But for now, let's just update the active viewers map.
+    // The `views` table insertion should probably happen on page load (get_player) or first heartbeat.
+    // Let's do it on first heartbeat for a session.
+
+    // For this task, let's just keep it simple:
+    // The `views` table tracks "hits".
+    // We can call `increment_view_count` here, but maybe limit it?
+    // Let's call it on `get_player` instead for the "view count" increment.
+    // And use heartbeat ONLY for "active viewers".
+
+    StatusCode::OK
+}
+
+pub async fn get_realtime_analytics(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, anyhow::Error>> + Send> {
+    let stream = async_stream::stream! {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            let mut active_counts = HashMap::new();
+            let now = std::time::Instant::now();
+
+            {
+                let mut viewers = state.active_viewers.write().await;
+                // Remove expired viewers (no heartbeat in last 30 seconds)
+                for (video_id, video_viewers) in viewers.iter_mut() {
+                    video_viewers.retain(|_, last_seen| now.duration_since(*last_seen) < Duration::from_secs(30));
+                    if !video_viewers.is_empty() {
+                        active_counts.insert(video_id.clone(), video_viewers.len());
+                    }
+                }
+                // Cleanup empty videos
+                viewers.retain(|_, v| !v.is_empty());
+            }
+
+            let json = serde_json::to_string(&active_counts).unwrap_or_default();
+            yield Ok(Event::default().data(json));
+        }
+    };
+
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+pub async fn get_analytics_history(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::database::ViewHistoryItem>>, (StatusCode, String)> {
+    let history = crate::database::get_analytics_history(&state.db_pool)
+        .await
+        .map_err(|e| internal_err(e))?;
+    Ok(Json(history))
+}
+
 fn internal_err(e: anyhow::Error) -> (axum::http::StatusCode, String) {
     error!(error = ?e, "internal error");
     (
@@ -435,6 +530,11 @@ pub async fn get_player(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
+    // Increment view count on page load
+    // Note: This is a simple implementation. In production, you'd want to debounce this
+    // or use a more sophisticated method to prevent abuse.
+    let _ = crate::database::increment_view_count(&state.db_pool, &id, &ip, user_agent).await;
+
     // Generate token
     let token = generate_token(&id, &state.secret_key, &ip, user_agent);
 
@@ -462,9 +562,16 @@ pub async fn get_player(
 
             try {{
                 await player.load('/hls/{}/index.m3u8');
+                startHeartbeat();
             }} catch (e) {{
                 onError(e);
             }}
+        }}
+
+        function startHeartbeat() {{
+            setInterval(() => {{
+                fetch('/api/videos/{}/heartbeat', {{ method: 'POST' }});
+            }}, 10000);
         }}
 
         function onErrorEvent(event) {{
@@ -482,7 +589,7 @@ pub async fn get_player(
             console.error('Unable to load the UI library!');
         }}
         "#,
-        id
+        id, id
     );
 
     let session = Session::new();
@@ -519,10 +626,23 @@ pub async fn get_player(
         minified_js
     );
 
+    // Determine cookie attributes based on protocol
+    let is_https = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|proto| proto == "https")
+        .unwrap_or(false);
+
+    let cookie_attr = if is_https {
+        "SameSite=None; Secure"
+    } else {
+        "SameSite=Lax"
+    };
+
     // Set cookie
     let cookie = format!(
-        "token={}; Path=/; HttpOnly; Max-Age=3600; SameSite=Lax",
-        token
+        "token={}; Path=/; HttpOnly; Max-Age=3600; {}",
+        token, cookie_attr
     );
 
     ([(header::SET_COOKIE, cookie)], Html(html))

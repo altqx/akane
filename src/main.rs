@@ -10,16 +10,16 @@ use axum::extract::DefaultBodyLimit;
 use axum::{
     Router,
     extract::{Request, State},
-    middleware::{self, Next},
-    response::Response,
     http::{StatusCode, header},
-    routing::{delete, get, post},
+    middleware::{self, Next},
     response::Redirect,
+    response::Response,
+    routing::{get, post},
 };
 use dotenv::dotenv;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
@@ -94,7 +94,10 @@ async fn main() -> Result<()> {
 
     let admin_password = std::env::var("ADMIN_PASSWORD").unwrap_or_else(|_| {
         let pass = Uuid::new_v4().to_string();
-        info!("ADMIN_PASSWORD not set, generated random password: {}", pass);
+        info!(
+            "ADMIN_PASSWORD not set, generated random password: {}",
+            pass
+        );
         pass
     });
 
@@ -106,9 +109,15 @@ async fn main() -> Result<()> {
         progress: progress.clone(),
         secret_key,
         admin_password,
+        active_viewers: Arc::new(RwLock::new(HashMap::new())),
     };
 
-    let api_routes = Router::new()
+    let public_routes = Router::new()
+        .route("/videos/{id}/heartbeat", post(handlers::heartbeat))
+        .route("/analytics/realtime", get(handlers::get_realtime_analytics))
+        .route("/analytics/history", get(handlers::get_analytics_history));
+
+    let protected_routes = Router::new()
         .route("/upload", post(handlers::upload_video))
         .route("/progress/{upload_id}", get(handlers::get_progress))
         .route("/videos", get(handlers::list_videos))
@@ -119,12 +128,22 @@ async fn main() -> Result<()> {
             auth_middleware,
         ));
 
+    let api_routes = Router::new().merge(public_routes).merge(protected_routes);
+
     let app = Router::new()
         .nest("/api", api_routes)
         .route("/hls/{id}/{*file}", get(handlers::get_hls_file))
         .route("/player/{id}", get(handlers::get_player))
-        .nest_service("/admin-webui", ServeDir::new("webui"))
-        .route("/", get(|| async { Redirect::permanent("https://altqx.com/") }))
+        .nest_service(
+            "/admin-webui",
+            ServeDir::new("webui")
+                .append_index_html_on_directories(false)
+                .fallback(ServeFile::new("webui/index.html")),
+        )
+        .route(
+            "/",
+            get(|| async { Redirect::permanent("https://altqx.com/") }),
+        )
         // e.g. 1 GB body limit
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(state);
