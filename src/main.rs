@@ -75,8 +75,8 @@ async fn main() -> Result<()> {
     };
 
     let app = Router::new()
-        .route("/upload", post(handlers::upload_video))
-        .route("/progress/{upload_id}", get(handlers::get_progress))
+        .route("/api/upload", post(handlers::upload_video))
+        .route("/api/progress/{upload_id}", get(handlers::get_progress))
         .route("/api/videos", get(handlers::list_videos))
         //.route("/api/purge", delete(handlers::purge_bucket))
         .route("/hls/{id}/{*file}", get(handlers::get_hls_file))

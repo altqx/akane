@@ -8,7 +8,7 @@ use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, g
 use axum::{
     Json,
     extract::{ConnectInfo, Multipart, Path, Query, State},
-    http::{StatusCode, header},
+    http::{StatusCode, header, HeaderMap},
     response::{Html, IntoResponse, Response},
 };
 use minify_js::{Session, TopLevelMode, minify};
@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 pub async fn upload_video(
     State(state): State<AppState>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResponse>, (axum::http::StatusCode, String)> {
     let mut video_path: Option<PathBuf> = None;
@@ -101,8 +102,12 @@ pub async fn upload_video(
         )
     })?;
 
-    // Create a unique upload ID for progress tracking
-    let upload_id = Uuid::new_v4().to_string();
+    // Create a unique upload ID for progress tracking, or use provided one
+    let upload_id = headers
+        .get("X-Upload-ID")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // Initialize progress
     let initial_progress = ProgressUpdate {
