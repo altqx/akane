@@ -282,7 +282,9 @@ fn generate_token(video_id: &str, secret: &str, ip: &str, user_agent: &str) -> S
         .as_secs()
         + 3600;
 
-    let payload = format!("{}:{}:{}:{}", video_id, expiration, ip, user_agent);
+    // Use ASCII Unit Separator (\x1F) as delimiter to avoid ambiguity with colons
+    // that commonly appear in User-Agent strings (e.g., "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    let payload = format!("{}\x1F{}\x1F{}\x1F{}", video_id, expiration, ip, user_agent);
 
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
@@ -294,13 +296,7 @@ fn generate_token(video_id: &str, secret: &str, ip: &str, user_agent: &str) -> S
 }
 
 // Helper to verify a signed token
-fn verify_token(
-    video_id: &str,
-    token: &str,
-    secret: &str,
-    ip: &str,
-    user_agent: &str,
-) -> bool {
+fn verify_token(video_id: &str, token: &str, secret: &str, ip: &str, user_agent: &str) -> bool {
     let parts: Vec<&str> = token.split(':').collect();
     if parts.len() != 2 {
         return false;
@@ -372,7 +368,13 @@ pub async fn get_hls_file(
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| addr.ip().to_string());
 
-        if !verify_token(&id, token, &state.secret_key, &ip) {
+        // Extract User-Agent header
+        let user_agent = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if !verify_token(&id, token, &state.secret_key, &ip, user_agent) {
             return Err((
                 StatusCode::FORBIDDEN,
                 "Access denied: Invalid or expired token".to_string(),
@@ -575,7 +577,7 @@ mod tests {
         use sha2::Sha256;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-// Manual token construction with expired time
+        // Manual token construction with expired time
         let secret = "my_secret_key";
         let video_id = "video123";
         let ip = "127.0.0.1";
@@ -584,10 +586,12 @@ mod tests {
         let expiration = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() - 100; // Expired
+            .as_secs()
+            - 100; // Expired
 
-        let payload = format!("{}:{}:{}:{}", video_id, expiration, ip, ua);
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+        let payload = format!("{}\x1F{}\x1F{}\x1F{}", video_id, expiration, ip, ua);
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+            .expect("HMAC can take key of any size");
         mac.update(payload.as_bytes());
         let signature = hex::encode(mac.finalize().into_bytes());
         let token = format!("{}:{}", expiration, signature);
