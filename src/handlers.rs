@@ -1,15 +1,15 @@
 use crate::database::{count_videos, list_videos as db_list_videos, save_video};
-use crate::storage::{generate_presigned_url, upload_hls_to_r2};
+use crate::storage::upload_hls_to_r2;
 use crate::types::{
     AppState, ProgressResponse, ProgressUpdate, UploadResponse, VideoListResponse, VideoQuery,
 };
 use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, get_video_height};
-use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+// use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use axum::{
     Json,
     extract::{Multipart, Path, Query, State},
     http::{StatusCode, header},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Response},
 };
 use minify_js::{Session, TopLevelMode, minify};
 use std::path::PathBuf;
@@ -335,8 +335,12 @@ pub async fn get_hls_file(
 ) -> Result<Response, (StatusCode, String)> {
     let key = format!("{}/{}", id, file);
 
-    // Verify token for .m3u8 requests
-    if file.ends_with(".m3u8") {
+    // Verify token for ALL HLS files (.m3u8, .ts, .vtt, .srt)
+    if file.ends_with(".m3u8")
+        || file.ends_with(".ts")
+        || file.ends_with(".vtt")
+        || file.ends_with(".srt")
+    {
         // Extract token from Cookie header
         let cookie_header = headers
             .get(header::COOKIE)
@@ -360,69 +364,40 @@ pub async fn get_hls_file(
         }
     }
 
-    // If it's a subtitle or segment file that slipped through (should be presigned in m3u8), redirect
-    if file.ends_with(".ts") || file.ends_with(".vtt") || file.ends_with(".srt") {
-        let url = generate_presigned_url(&state, &key)
-            .await
-            .map_err(|e| internal_err(e))?;
-        return Ok(Redirect::temporary(&url).into_response());
-    }
+    // Fetch content from S3 for all file types (Proxy)
+    let content = state
+        .s3
+        .get_object()
+        .bucket(&state.bucket)
+        .key(&key)
+        .send()
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
 
-    // If it's a playlist, we need to fetch and rewrite
-    if file.ends_with(".m3u8") {
-        let content = state
-            .s3
-            .get_object()
-            .bucket(&state.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+    // Load content into memory (simplifies type handling for ByteStream)
+    let body_bytes = content
+        .body
+        .collect()
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?
+        .into_bytes();
 
-        let body_bytes = content
-            .body
-            .collect()
-            .await
-            .map_err(|e| internal_err(anyhow::anyhow!(e)))?
-            .into_bytes();
+    let body = axum::body::Body::from(body_bytes);
 
-        let content_str =
-            String::from_utf8(body_bytes.to_vec()).map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+    // Determine Content-Type
+    let content_type = if file.ends_with(".m3u8") {
+        "application/vnd.apple.mpegurl"
+    } else if file.ends_with(".ts") {
+        "video/mp2t"
+    } else if file.ends_with(".vtt") {
+        "text/vtt"
+    } else if file.ends_with(".srt") {
+        "text/plain" // or application/x-subrip
+    } else {
+        "application/octet-stream"
+    };
 
-        // No need to rewrite m3u8 for token propagation anymore!
-        // Cookies are sent automatically for all requests to this domain.
-        // We still need to rewrite segments to be presigned URLs though.
-
-        let mut new_lines = Vec::new();
-        for line in content_str.lines() {
-            let line = line.trim();
-            if line.ends_with(".ts") {
-                // It's a segment, presign it
-                let parent = std::path::Path::new(&key)
-                    .parent()
-                    .unwrap_or(std::path::Path::new(""));
-                let segment_key = parent.join(line).to_string_lossy().replace("\\", "/");
-
-                let presigned_url = generate_presigned_url(&state, &segment_key)
-                    .await
-                    .map_err(|e| internal_err(e))?;
-                new_lines.push(presigned_url);
-            } else {
-                // Keep everything else as is (including variant playlists)
-                new_lines.push(line.to_string());
-            }
-        }
-
-        let new_content = new_lines.join("\n");
-
-        return Ok((
-            [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
-            new_content,
-        )
-            .into_response());
-    }
-
-    Err((StatusCode::NOT_FOUND, "File not found".to_string()))
+    Ok(([(header::CONTENT_TYPE, content_type)], body).into_response())
 }
 
 pub async fn get_player(
