@@ -256,18 +256,11 @@ export default function Videos() {
                       </div>
                     </td>
                     <td className='tabular-nums text-base-content/70'>{formatDuration(video.duration)}</td>
-                    <td className='text-base-content/70 text-xs'>
-                      {new Date(video.created_at).toLocaleDateString()}
-                    </td>
+                    <td className='text-base-content/70 text-xs'>{new Date(video.created_at).toLocaleDateString()}</td>
                     <td className='text-right'>
                       <div className='flex justify-end gap-2'>
                         {video.player_url && (
-                          <Button
-                            size='sm'
-                            variant='secondary'
-                            onClick={() => copyEmbedCode(video)}
-                            className='btn-xs'
-                          >
+                          <Button size='sm' variant='secondary' onClick={() => copyEmbedCode(video)} className='btn-xs'>
                             {copiedId === video.id ? 'Copied!' : 'Copy Embed'}
                           </Button>
                         )}

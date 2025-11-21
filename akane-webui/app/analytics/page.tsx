@@ -165,7 +165,10 @@ export default function AnalyticsPage() {
             <table className='table w-full'>
               <thead>
                 <tr>
-                  <th className='cursor-pointer hover:text-base-content transition-colors' onClick={() => handleSort('name')}>
+                  <th
+                    className='cursor-pointer hover:text-base-content transition-colors'
+                    onClick={() => handleSort('name')}
+                  >
                     Video {sortConfig.key === 'name' && (sortConfig.direction === 'asc' ? '↑' : '↓')}
                   </th>
                   <th

@@ -15,9 +15,7 @@ export default function ProgressBar({ percentage, stage, currentChunk, totalChun
       </div>
       <progress className='progress progress-primary w-full' value={percentage} max='100'></progress>
       <div className='mt-1 flex justify-between text-xs text-base-content/70'>
-        <span>
-          {currentChunk > 0 ? `${currentChunk} / ${totalChunks} chunks` : ''}
-        </span>
+        <span>{currentChunk > 0 ? `${currentChunk} / ${totalChunks} chunks` : ''}</span>
         <span>{details}</span>
       </div>
     </div>

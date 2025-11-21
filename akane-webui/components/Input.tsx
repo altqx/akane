@@ -13,12 +13,7 @@ const Input = forwardRef<HTMLInputElement, InputProps>(({ label, hint, className
           <span className='label-text'>{label}</span>
         </div>
       )}
-      <input
-        ref={ref}
-        id={id}
-        className={`input input-bordered w-full ${className}`}
-        {...props}
-      />
+      <input ref={ref} id={id} className={`input input-bordered w-full ${className}`} {...props} />
       {hint && (
         <div className='label'>
           <span className='label-text-alt text-muted-foreground'>{hint}</span>

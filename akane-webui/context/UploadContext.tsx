@@ -80,7 +80,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       // Create a promise that resolves when processing is complete
       const processingPromise = new Promise<{ player_url: string; upload_id: string }>((resolve, reject) => {
         const eventSource = new EventSource(`/api/progress/${uploadId}`)
-        
+
         eventSource.onmessage = (event) => {
           try {
             const data: ProgressData = JSON.parse(event.data)
@@ -116,12 +116,12 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
         // Use XMLHttpRequest for upload progress
         const xhr = new XMLHttpRequest()
-        
+
         const uploadPromise = new Promise<void>((resolve, reject) => {
           xhr.upload.addEventListener('progress', (event) => {
             if (event.lengthComputable) {
               const percentComplete = (event.loaded / event.total) * 100
-              setProgress(prev => {
+              setProgress((prev) => {
                 // Only update if we are still in the uploading stage (or haven't started processing)
                 if (!prev || prev.stage === 'Uploading to server') {
                   return {
@@ -159,7 +159,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
         // Wait for upload to finish
         await uploadPromise
-        
+
         // Wait for processing to finish
         const data = await processingPromise
 
