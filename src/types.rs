@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use std::collections::HashMap;
-use tokio::sync::RwLock;
 use aws_sdk_s3::Client as S3Client;
-use sqlx::SqlitePool;
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ProgressUpdate {
@@ -29,11 +29,12 @@ pub struct AppState {
     pub public_base_url: String,
     pub db_pool: SqlitePool,
     pub progress: ProgressMap,
+    pub secret_key: String,
 }
 
 #[derive(Serialize)]
 pub struct UploadResponse {
-    pub playlist_url: String,
+    pub player_url: String,
     pub upload_id: String,
 }
 
@@ -61,7 +62,7 @@ pub struct VideoDto {
     pub available_resolutions: Vec<String>,
     pub duration: u32,
     pub thumbnail_url: String,
-    pub playlist_url: String,
+    pub player_url: String,
     pub created_at: String,
 }
 

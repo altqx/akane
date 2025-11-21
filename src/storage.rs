@@ -1,7 +1,9 @@
 use crate::types::AppState;
 use anyhow::{Context, Result};
+use aws_sdk_s3::presigning::PresigningConfig;
 use futures::stream::{self, StreamExt};
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::fs;
 use tracing::info;
 
@@ -89,4 +91,18 @@ pub async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str)
         .ok_or_else(|| anyhow::anyhow!("no master playlist (index.m3u8) generated"))?;
 
     Ok(playlist_key)
+}
+
+pub async fn generate_presigned_url(state: &AppState, key: &str) -> Result<String> {
+    let presigning_config = PresigningConfig::expires_in(Duration::from_secs(3600))?;
+
+    let presigned_request = state
+        .s3
+        .get_object()
+        .bucket(&state.bucket)
+        .key(key)
+        .presigned(presigning_config)
+        .await?;
+
+    Ok(presigned_request.uri().to_string())
 }

@@ -9,7 +9,7 @@ use aws_sdk_s3::{Client as S3Client, config::Region};
 use axum::extract::DefaultBodyLimit;
 use axum::{
     Router,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use dotenv::dotenv;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
@@ -17,6 +17,7 @@ use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
 
 use types::AppState;
 
@@ -59,18 +60,27 @@ async fn main() -> Result<()> {
 
     let progress = Arc::new(RwLock::new(HashMap::new()));
 
+    let secret_key = std::env::var("SECRET_KEY").unwrap_or_else(|_| {
+        // Generate a random key if not provided (for dev)
+        Uuid::new_v4().to_string()
+    });
+
     let state = AppState {
         s3,
         bucket: r2_bucket,
         public_base_url,
         db_pool,
         progress: progress.clone(),
+        secret_key,
     };
 
     let app = Router::new()
         .route("/upload", post(handlers::upload_video))
         .route("/progress/{upload_id}", get(handlers::get_progress))
         .route("/api/videos", get(handlers::list_videos))
+        //.route("/api/purge", delete(handlers::purge_bucket))
+        .route("/hls/{id}/{*file}", get(handlers::get_hls_file))
+        .route("/player/{id}", get(handlers::get_player))
         .fallback_service(ServeDir::new("public"))
         // e.g. 1 GB body limit
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))

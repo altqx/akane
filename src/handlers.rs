@@ -1,12 +1,17 @@
-use crate::database::{save_video, count_videos, list_videos as db_list_videos};
-use crate::storage::upload_hls_to_r2;
-use crate::types::{AppState, ProgressResponse, ProgressUpdate, UploadResponse, VideoListResponse, VideoQuery};
+use crate::database::{count_videos, list_videos as db_list_videos, save_video};
+use crate::storage::{generate_presigned_url, upload_hls_to_r2};
+use crate::types::{
+    AppState, ProgressResponse, ProgressUpdate, UploadResponse, VideoListResponse, VideoQuery,
+};
 use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, get_video_height};
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use axum::{
     Json,
-    extract::{Multipart, Path, State, Query},
-    http::StatusCode,
+    extract::{Multipart, Path, Query, State},
+    http::{StatusCode, header},
+    response::{Html, IntoResponse, Redirect, Response},
 };
+use minify_js::{Session, TopLevelMode, minify};
 use std::path::PathBuf;
 use tokio::{fs, io::AsyncWriteExt};
 use tracing::error;
@@ -160,16 +165,10 @@ pub async fn upload_video(
 
     // Upload HLS to R2
     let prefix = format!("{}/", output_id);
+    // Build public URL (pointing to our proxy)
     let playlist_key = upload_hls_to_r2(&state, &hls_dir, &prefix)
         .await
         .map_err(|e| internal_err(e))?;
-
-    // Build public URL (you should front this with your CDN/domain)
-    let playlist_url = format!(
-        "{}/{}",
-        state.public_base_url.trim_end_matches('/'),
-        playlist_key
-    );
 
     // Save to database
     let thumbnail_key = format!("{}/thumbnail.jpg", output_id);
@@ -192,8 +191,11 @@ pub async fn upload_video(
     let _ = fs::remove_file(&video_path).await;
     let _ = fs::remove_dir_all(&hls_dir).await;
 
+    // Return player URL
+    let player_url = format!("/player/{}", output_id);
+
     Ok(Json(UploadResponse {
-        playlist_url,
+        player_url,
         upload_id,
     }))
 }
@@ -257,11 +259,265 @@ pub async fn list_videos(
         has_prev,
     }))
 }
- 
+
 fn internal_err(e: anyhow::Error) -> (axum::http::StatusCode, String) {
     error!(error = ?e, "internal error");
     (
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         "internal server error".to_string(),
     )
+}
+
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// Helper to generate a signed token
+fn generate_token(video_id: &str, secret: &str) -> String {
+    // Token valid for 1 hour (3600 seconds)
+    let expiration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+
+    let payload = format!("{}:{}", video_id, expiration);
+
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload.as_bytes());
+    let result = mac.finalize();
+    let signature = hex::encode(result.into_bytes());
+
+    format!("{}:{}", expiration, signature)
+}
+
+// Helper to verify a signed token
+fn verify_token(video_id: &str, token: &str, secret: &str) -> bool {
+    let parts: Vec<&str> = token.split(':').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+
+    let expiration_str = parts[0];
+    let signature = parts[1];
+
+    // Check expiration
+    let expiration: u64 = match expiration_str.parse() {
+        Ok(ts) => ts,
+        Err(_) => return false,
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    if now > expiration {
+        return false;
+    }
+
+    // Verify signature
+    let payload = format!("{}:{}", video_id, expiration);
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload.as_bytes());
+
+    let expected_signature = hex::encode(mac.finalize().into_bytes());
+
+    expected_signature == signature
+}
+
+pub async fn get_hls_file(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((id, file)): Path<(String, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    let key = format!("{}/{}", id, file);
+
+    // Verify token for .m3u8 requests
+    if file.ends_with(".m3u8") {
+        // Extract token from Cookie header
+        let cookie_header = headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        let mut token = "";
+        for cookie in cookie_header.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("token=") {
+                token = val;
+                break;
+            }
+        }
+
+        if !verify_token(&id, token, &state.secret_key) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Access denied: Invalid or expired token".to_string(),
+            ));
+        }
+    }
+
+    // If it's a subtitle or segment file that slipped through (should be presigned in m3u8), redirect
+    if file.ends_with(".ts") || file.ends_with(".vtt") || file.ends_with(".srt") {
+        let url = generate_presigned_url(&state, &key)
+            .await
+            .map_err(|e| internal_err(e))?;
+        return Ok(Redirect::temporary(&url).into_response());
+    }
+
+    // If it's a playlist, we need to fetch and rewrite
+    if file.ends_with(".m3u8") {
+        let content = state
+            .s3
+            .get_object()
+            .bucket(&state.bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+        let body_bytes = content
+            .body
+            .collect()
+            .await
+            .map_err(|e| internal_err(anyhow::anyhow!(e)))?
+            .into_bytes();
+
+        let content_str =
+            String::from_utf8(body_bytes.to_vec()).map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+        // No need to rewrite m3u8 for token propagation anymore!
+        // Cookies are sent automatically for all requests to this domain.
+        // We still need to rewrite segments to be presigned URLs though.
+
+        let mut new_lines = Vec::new();
+        for line in content_str.lines() {
+            let line = line.trim();
+            if line.ends_with(".ts") {
+                // It's a segment, presign it
+                let parent = std::path::Path::new(&key)
+                    .parent()
+                    .unwrap_or(std::path::Path::new(""));
+                let segment_key = parent.join(line).to_string_lossy().replace("\\", "/");
+
+                let presigned_url = generate_presigned_url(&state, &segment_key)
+                    .await
+                    .map_err(|e| internal_err(e))?;
+                new_lines.push(presigned_url);
+            } else {
+                // Keep everything else as is (including variant playlists)
+                new_lines.push(line.to_string());
+            }
+        }
+
+        let new_content = new_lines.join("\n");
+
+        return Ok((
+            [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
+            new_content,
+        )
+            .into_response());
+    }
+
+    Err((StatusCode::NOT_FOUND, "File not found".to_string()))
+}
+
+pub async fn get_player(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Generate token
+    let token = generate_token(&id, &state.secret_key);
+
+    let js_code = format!(
+        r#"
+        async function init() {{
+            const video = document.getElementById('video');
+            const ui = video['ui'];
+            const controls = ui.getControls();
+            const player = controls.getPlayer();
+            const config = {{
+                'controlPanelElements': ['play_pause', 'time_and_duration', 'spacer', 'mute', 'volume', 'fullscreen', 'overflow_menu'],
+                'overflowMenuButtons': ['quality', 'playback_rate', 'captions', 'picture_in_picture', 'cast'],
+                'seekBarColors': {{
+                    base: 'rgba(255, 255, 255, 0.3)',
+                    buffered: 'rgba(255, 255, 255, 0.54)',
+                    played: 'rgb(255, 0, 0)',
+                }}
+            }};
+            
+            ui.configure(config);
+            window.player = player;
+            window.ui = ui;
+            player.addEventListener('error', onErrorEvent);
+
+            try {{
+                await player.load('/hls/{}/index.m3u8');
+            }} catch (e) {{
+                onError(e);
+            }}
+        }}
+
+        function onErrorEvent(event) {{
+            onError(event.detail);
+        }}
+
+        function onError(error) {{
+            console.error('Error code', error.code, 'object', error);
+        }}
+
+        document.addEventListener('shaka-ui-loaded', init);
+        document.addEventListener('shaka-ui-load-failed', initFailed);
+
+        function initFailed() {{
+            console.error('Unable to load the UI library!');
+        }}
+        "#,
+        id
+    );
+
+    let session = Session::new();
+    let mut out = Vec::new();
+    minify(&session, TopLevelMode::Global, js_code.as_bytes(), &mut out).unwrap();
+    let minified_js = String::from_utf8(out).unwrap();
+
+    let html = format!(
+        r#"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Player</title>
+    <!-- Shaka Player UI CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.11/controls.min.css" />
+    <style>
+        body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }}
+        #video-container {{ width: 100%; height: 100%; }}
+        #video {{ width: 100%; height: 100%; }}
+    </style>
+    <!-- Shaka Player UI JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.11/shaka-player.ui.min.js"></script>
+</head>
+<body>
+    <div id="video-container" data-shaka-player-container>
+        <video id="video" autoplay data-shaka-player></video>
+    </div>
+    <script>{}</script>
+</body>
+</html>
+"#,
+        minified_js
+    );
+
+    // Set cookie
+    let cookie = format!(
+        "token={}; Path=/; HttpOnly; Max-Age=3600; SameSite=Lax",
+        token
+    );
+
+    ([(header::SET_COOKIE, cookie)], Html(html))
 }
