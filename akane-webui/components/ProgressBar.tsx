@@ -3,17 +3,22 @@ interface ProgressBarProps {
   stage: string
   currentChunk: number
   totalChunks: number
+  details?: string
 }
 
-export default function ProgressBar({ percentage, stage, currentChunk, totalChunks }: ProgressBarProps) {
+export default function ProgressBar({ percentage, stage, currentChunk, totalChunks, details }: ProgressBarProps) {
   return (
-    <div className='mb-3'>
-      <div className='mb-1 text-sm font-medium text-foreground'>{stage}</div>
-      <div className='h-2 w-full overflow-hidden rounded-full bg-secondary'>
-        <div className='h-full bg-primary transition-all duration-300 ease-out' style={{ width: `${percentage}%` }} />
+    <div className='mb-3 w-full'>
+      <div className='mb-1 flex justify-between text-sm font-medium'>
+        <span>{stage}</span>
+        <span>{percentage}%</span>
       </div>
-      <div className='mt-1 text-xs text-muted-foreground'>
-        {currentChunk} / {totalChunks} chunks - {percentage}%
+      <progress className='progress progress-primary w-full' value={percentage} max='100'></progress>
+      <div className='mt-1 flex justify-between text-xs text-base-content/70'>
+        <span>
+          {currentChunk > 0 ? `${currentChunk} / ${totalChunks} chunks` : ''}
+        </span>
+        <span>{details}</span>
       </div>
     </div>
   )

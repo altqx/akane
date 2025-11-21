@@ -40,20 +40,26 @@ export default function AuthWrapper({ children }: { children: React.ReactNode })
 
   if (!isAuthenticated) {
     return (
-      <div className='flex min-h-screen items-center justify-center bg-background'>
-        <div className='w-full max-w-md rounded-lg border border-border bg-card p-8 shadow-sm text-card-foreground'>
-          <h1 className='mb-6 text-center text-2xl font-bold'>Admin Access</h1>
-          <form onSubmit={handleLogin} className='flex flex-col gap-4'>
-            <Input
-              type='password'
-              label='Password'
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder='Enter admin password'
-            />
-            {error && <div className='text-sm text-destructive'>{error}</div>}
-            <Button type='submit'>Login</Button>
-          </form>
+      <div className='flex min-h-screen items-center justify-center bg-base-200'>
+        <div className='card w-full max-w-md bg-base-100 shadow-xl'>
+          <div className='card-body'>
+            <h2 className='card-title justify-center mb-4 text-2xl font-bold'>Admin Access</h2>
+            <form onSubmit={handleLogin} className='flex flex-col gap-4'>
+              <Input
+                type='password'
+                label='Password'
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder='Enter admin password'
+              />
+              {error && <div className='text-sm text-error'>{error}</div>}
+              <div className='card-actions justify-end mt-4'>
+                <Button type='submit' className='w-full'>
+                  Login
+                </Button>
+              </div>
+            </form>
+          </div>
         </div>
       </div>
     )

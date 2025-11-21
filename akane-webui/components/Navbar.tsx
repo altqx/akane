@@ -7,33 +7,31 @@ export default function Navbar() {
   const isActive = (path: string) => pathname === path
 
   return (
-    <nav className='mb-8 border-b border-border pb-4'>
-      <div className='flex gap-6'>
-        <Link
-          href='/'
-          className={`text-sm font-medium transition-colors hover:text-primary ${
-            isActive('/') ? 'text-primary' : 'text-muted-foreground'
-          }`}
-        >
-          Uploader
-        </Link>
-        <Link
-          href='/videos'
-          className={`text-sm font-medium transition-colors hover:text-primary ${
-            isActive('/videos') ? 'text-primary' : 'text-muted-foreground'
-          }`}
-        >
-          Videos
-        </Link>
-        <Link
-          href='/analytics'
-          className={`text-sm font-medium transition-colors hover:text-primary ${
-            isActive('/analytics') ? 'text-primary' : 'text-muted-foreground'
-          }`}
-        >
-          Analytics
+    <div className='navbar bg-base-100 mb-8 border-b border-base-300'>
+      <div className='flex-1'>
+        <Link href='/' className='btn btn-ghost text-xl'>
+          Akane
         </Link>
       </div>
-    </nav>
+      <div className='flex-none'>
+        <ul className='menu menu-horizontal px-1'>
+          <li>
+            <Link href='/' className={isActive('/') ? 'active' : ''}>
+              Uploader
+            </Link>
+          </li>
+          <li>
+            <Link href='/videos' className={isActive('/videos') ? 'active' : ''}>
+              Videos
+            </Link>
+          </li>
+          <li>
+            <Link href='/analytics' className={isActive('/analytics') ? 'active' : ''}>
+              Analytics
+            </Link>
+          </li>
+        </ul>
+      </div>
+    </div>
   )
 }

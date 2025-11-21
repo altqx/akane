@@ -6,13 +6,16 @@ import Button from '@/components/Button'
 import Input from '@/components/Input'
 
 interface Video {
+  id: string
   name: string
   tags: string[]
   available_resolutions: string[]
   duration: number
   created_at: string
   playlist_url: string | null
+  player_url: string | null
   thumbnail_url: string | null
+  view_count: number
 }
 
 interface VideoResponse {
@@ -39,6 +42,8 @@ export default function Videos() {
   const [total, setTotal] = useState(0)
   const [hasNext, setHasNext] = useState(false)
   const [hasPrev, setHasPrev] = useState(false)
+
+  const [copiedId, setCopiedId] = useState<string | null>(null)
 
   const loadVideos = useCallback(async () => {
     setLoading(true)
@@ -98,37 +103,52 @@ export default function Videos() {
     return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
   }
 
-  return (
-    <div className='min-h-screen bg-background p-10 font-sans text-foreground'>
-      <div className='mx-auto max-w-6xl'>
-        <h1 className='mb-2 text-3xl font-bold'>Akane Videos Admin</h1>
-        <p className='mb-6 text-muted-foreground'>Browse videos stored in videos.db, with search and pagination.</p>
+  const copyEmbedCode = async (video: Video) => {
+    if (!video.player_url) return
+    const code = `<iframe src="${window.location.origin}${video.player_url}" width="100%" height="100%" frameborder="0" allowfullscreen></iframe>`
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopiedId(video.id)
+      setTimeout(() => setCopiedId(null), 2000)
+    } catch (err) {
+      console.error('Failed to copy:', err)
+    }
+  }
 
-        <Navbar />
+  return (
+    <div className='min-h-screen bg-base-200 p-10 font-sans'>
+      <div className='mx-auto max-w-7xl'>
+        <div className='flex justify-between items-center mb-8'>
+          <div>
+            <h1 className='text-3xl font-bold tracking-tight'>Videos</h1>
+            <p className='text-base-content/70 mt-1'>Manage and organize your video library.</p>
+          </div>
+          <Navbar />
+        </div>
 
         <form
           onSubmit={handleSearch}
-          className='mb-8 flex flex-wrap items-end gap-4 rounded-lg border border-border bg-card p-4 text-card-foreground shadow-sm'
+          className='mb-8 flex flex-wrap items-end gap-4 rounded-xl bg-base-100 p-4 shadow-sm'
         >
-          <div className='w-full sm:w-auto'>
+          <div className='w-full sm:w-auto flex-1 min-w-[200px]'>
             <Input
               label='Name contains'
-              placeholder='Video name...'
+              placeholder='Search videos...'
               value={nameFilter}
               onChange={(e) => setNameFilter(e.target.value)}
             />
           </div>
-          <div className='w-full sm:w-auto'>
+          <div className='w-full sm:w-auto flex-1 min-w-[200px]'>
             <Input
               label='Tag contains'
-              placeholder='e.g. gaming'
+              placeholder='Filter by tag...'
               value={tagFilter}
               onChange={(e) => setTagFilter(e.target.value)}
             />
           </div>
-          <div className='flex flex-col gap-2'>
-            <label htmlFor='pageSize' className='text-sm font-medium leading-none text-foreground'>
-              Page size
+          <div className='form-control'>
+            <label htmlFor='pageSize' className='label'>
+              <span className='label-text'>Page size</span>
             </label>
             <select
               id='pageSize'
@@ -137,98 +157,131 @@ export default function Videos() {
                 setPageSize(Number(e.target.value))
                 setPage(1)
               }}
-              className='flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50'
+              className='select select-bordered w-full max-w-xs'
             >
-              <option value='10' className='bg-popover text-popover-foreground'>
-                10
-              </option>
-              <option value='20' className='bg-popover text-popover-foreground'>
-                20
-              </option>
-              <option value='50' className='bg-popover text-popover-foreground'>
-                50
-              </option>
+              <option value='10'>10</option>
+              <option value='20'>20</option>
+              <option value='50'>50</option>
             </select>
           </div>
-          <Button type='submit' disabled={loading}>
-            Search
-          </Button>
+          <div className='pb-1'>
+            <Button type='submit' disabled={loading}>
+              Search
+            </Button>
+          </div>
         </form>
 
-        {error && <div className='mb-6 rounded-md bg-destructive/15 p-4 text-destructive'>Error: {error}</div>}
+        {error && (
+          <div role='alert' className='alert alert-error mb-6'>
+            <svg
+              xmlns='http://www.w3.org/2000/svg'
+              className='stroke-current shrink-0 h-6 w-6'
+              fill='none'
+              viewBox='0 0 24 24'
+            >
+              <path
+                strokeLinecap='round'
+                strokeLinejoin='round'
+                strokeWidth='2'
+                d='M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z'
+              />
+            </svg>
+            <span>{error}</span>
+          </div>
+        )}
 
-        <div className='overflow-hidden rounded-lg border border-border bg-card text-card-foreground shadow-sm'>
-          <table className='w-full text-left text-sm'>
-            <thead className='bg-muted/50 text-muted-foreground'>
+        <div className='overflow-x-auto rounded-xl bg-base-100 shadow-sm'>
+          <table className='table w-full'>
+            <thead>
               <tr>
-                <th className='border-b border-border px-4 py-3 font-medium'>Name</th>
-                <th className='border-b border-border px-4 py-3 font-medium'>Tags</th>
-                <th className='border-b border-border px-4 py-3 font-medium'>Resolutions</th>
-                <th className='border-b border-border px-4 py-3 font-medium'>Duration</th>
-                <th className='border-b border-border px-4 py-3 font-medium'>Created at</th>
-                <th className='border-b border-border px-4 py-3 font-medium'>Playlist</th>
-                <th className='border-b border-border px-4 py-3 font-medium'>Thumbnail</th>
+                <th>Video</th>
+                <th>Tags</th>
+                <th>Stats</th>
+                <th>Duration</th>
+                <th>Created</th>
+                <th className='text-right'>Actions</th>
               </tr>
             </thead>
-            <tbody className='divide-y divide-border'>
+            <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} className='px-4 py-8 text-center text-muted-foreground'>
-                    Loading...
+                  <td colSpan={6} className='text-center py-12'>
+                    <span className='loading loading-spinner loading-lg'></span>
+                    <div className='mt-2'>Loading videos...</div>
                   </td>
                 </tr>
               ) : videos.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className='px-4 py-8 text-center text-muted-foreground'>
-                    No videos found.
+                  <td colSpan={6} className='text-center py-12 text-base-content/70'>
+                    No videos found matching your criteria.
                   </td>
                 </tr>
               ) : (
                 videos.map((video, idx) => (
-                  <tr key={idx} className='hover:bg-muted/50 transition-colors'>
-                    <td className='px-4 py-3 font-medium'>{video.name}</td>
-                    <td className='px-4 py-3'>
+                  <tr key={idx} className='hover'>
+                    <td>
+                      <div className='flex items-center gap-3'>
+                        <div className='avatar'>
+                          <div className='mask mask-squircle w-16 h-10'>
+                            {video.thumbnail_url ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img src={video.thumbnail_url} alt={video.name} />
+                            ) : (
+                              <div className='w-full h-full bg-base-300 flex items-center justify-center text-xs'>
+                                No img
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className='font-bold max-w-[200px] truncate' title={video.name}>
+                          {video.name}
+                        </div>
+                      </div>
+                    </td>
+                    <td>
                       <div className='flex flex-wrap gap-1'>
                         {video.tags.map((tag, i) => (
-                          <span
-                            key={i}
-                            className='inline-flex items-center rounded-full border border-transparent bg-secondary px-2 py-0.5 text-xs font-semibold text-secondary-foreground transition-colors hover:bg-secondary/80'
-                          >
+                          <span key={i} className='badge badge-secondary badge-outline badge-sm'>
                             {tag}
                           </span>
                         ))}
                       </div>
                     </td>
-                    <td className='px-4 py-3 text-muted-foreground'>{video.available_resolutions.join(', ')}</td>
-                    <td className='px-4 py-3 tabular-nums text-muted-foreground'>{formatDuration(video.duration)}</td>
-                    <td className='px-4 py-3 text-muted-foreground'>{video.created_at}</td>
-                    <td className='px-4 py-3'>
-                      {video.playlist_url ? (
-                        <a
-                          href={video.playlist_url}
-                          target='_blank'
-                          rel='noopener noreferrer'
-                          className='text-primary hover:underline'
-                        >
-                          Open
-                        </a>
-                      ) : (
-                        <span className='text-muted-foreground'>N/A</span>
-                      )}
+                    <td>
+                      <div className='flex flex-col text-xs'>
+                        <span className='text-base-content/70'>
+                          <span className='font-bold text-base-content'>{video.view_count.toLocaleString()}</span> views
+                        </span>
+                        <span className='text-base-content/50'>{video.available_resolutions.length} qualities</span>
+                      </div>
                     </td>
-                    <td className='px-4 py-3'>
-                      {video.thumbnail_url ? (
-                        <a href={video.thumbnail_url} target='_blank' rel='noopener noreferrer'>
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={video.thumbnail_url}
-                            alt='Thumbnail'
-                            className='h-12 w-20 rounded border border-border object-cover'
-                          />
-                        </a>
-                      ) : (
-                        <span className='text-xs text-muted-foreground'>No thumbnail</span>
-                      )}
+                    <td className='tabular-nums text-base-content/70'>{formatDuration(video.duration)}</td>
+                    <td className='text-base-content/70 text-xs'>
+                      {new Date(video.created_at).toLocaleDateString()}
+                    </td>
+                    <td className='text-right'>
+                      <div className='flex justify-end gap-2'>
+                        {video.player_url && (
+                          <Button
+                            size='sm'
+                            variant='secondary'
+                            onClick={() => copyEmbedCode(video)}
+                            className='btn-xs'
+                          >
+                            {copiedId === video.id ? 'Copied!' : 'Copy Embed'}
+                          </Button>
+                        )}
+                        {video.playlist_url && (
+                          <Button
+                            size='sm'
+                            variant='outline'
+                            onClick={() => window.open(video.playlist_url!, '_blank')}
+                            className='btn-xs'
+                          >
+                            Open
+                          </Button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -238,20 +291,23 @@ export default function Videos() {
         </div>
 
         <div className='mt-4 flex items-center justify-between'>
-          <div className='flex gap-2'>
-            <Button
-              variant='outline'
-              size='sm'
+          <div className='join'>
+            <button
+              className='join-item btn btn-sm'
               disabled={!hasPrev || loading}
               onClick={() => setPage((p) => Math.max(1, p - 1))}
             >
-              Prev
-            </Button>
-            <Button variant='outline' size='sm' disabled={!hasNext || loading} onClick={() => setPage((p) => p + 1)}>
+              Previous
+            </button>
+            <button
+              className='join-item btn btn-sm'
+              disabled={!hasNext || loading}
+              onClick={() => setPage((p) => p + 1)}
+            >
               Next
-            </Button>
+            </button>
           </div>
-          <div className='text-sm text-muted-foreground'>
+          <div className='text-sm text-base-content/70'>
             {total > 0 ? (
               <>
                 Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total} videos
