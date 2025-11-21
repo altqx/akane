@@ -13,14 +13,14 @@ export default function ProgressBar({
 }: ProgressBarProps) {
   return (
     <div className="mb-3">
-      <div className="mb-1 text-sm font-medium text-gray-700">{stage}</div>
-      <div className="h-1.5 w-full overflow-hidden rounded bg-gray-200">
+      <div className="mb-1 text-sm font-medium text-foreground">{stage}</div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
         <div 
-          className="h-full bg-blue-600 transition-all duration-300 ease-out"
+          className="h-full bg-primary transition-all duration-300 ease-out"
           style={{ width: `${percentage}%` }}
         />
       </div>
-      <div className="mt-1 text-xs text-gray-500">
+      <div className="mt-1 text-xs text-muted-foreground">
         {currentChunk} / {totalChunks} chunks - {percentage}%
       </div>
     </div>

@@ -67,7 +67,6 @@ export default function Videos() {
       setTotal(data.total || 0);
       setHasNext(data.has_next);
       setHasPrev(data.has_prev);
-      // Update page/pageSize from server response if needed, but usually local state is source of truth for request
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
@@ -100,14 +99,14 @@ export default function Videos() {
   };
 
   return (
-    <div className="min-h-screen bg-white p-10 font-sans text-gray-900">
+    <div className="min-h-screen bg-background p-10 font-sans text-foreground">
       <div className="mx-auto max-w-6xl">
         <h1 className="mb-2 text-3xl font-bold">Akane Videos Admin</h1>
-        <p className="mb-6 text-gray-500">Browse videos stored in videos.db, with search and pagination.</p>
+        <p className="mb-6 text-muted-foreground">Browse videos stored in videos.db, with search and pagination.</p>
         
         <Navbar />
 
-        <form onSubmit={handleSearch} className="mb-8 flex flex-wrap items-end gap-4 rounded bg-gray-50 p-4">
+        <form onSubmit={handleSearch} className="mb-8 flex flex-wrap items-end gap-4 rounded-lg border border-border bg-card p-4 text-card-foreground shadow-sm">
           <div className="w-full sm:w-auto">
             <Input 
               label="Name contains" 
@@ -124,8 +123,8 @@ export default function Videos() {
               onChange={(e) => setTagFilter(e.target.value)}
             />
           </div>
-          <div className="flex flex-col gap-1">
-            <label htmlFor="pageSize" className="text-sm font-medium text-gray-700">Page size</label>
+          <div className="flex flex-col gap-2">
+            <label htmlFor="pageSize" className="text-sm font-medium leading-none text-foreground">Page size</label>
             <select 
               id="pageSize"
               value={pageSize}
@@ -133,64 +132,64 @@ export default function Videos() {
                 setPageSize(Number(e.target.value));
                 setPage(1);
               }}
-              className="rounded border border-gray-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-1 focus:ring-blue-600"
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <option value="10">10</option>
-              <option value="20">20</option>
-              <option value="50">50</option>
+              <option value="10" className="bg-popover text-popover-foreground">10</option>
+              <option value="20" className="bg-popover text-popover-foreground">20</option>
+              <option value="50" className="bg-popover text-popover-foreground">50</option>
             </select>
           </div>
           <Button type="submit" disabled={loading}>Search</Button>
         </form>
 
         {error && (
-          <div className="mb-6 rounded bg-red-50 p-4 text-red-700">
+          <div className="mb-6 rounded-md bg-destructive/15 p-4 text-destructive">
             Error: {error}
           </div>
         )}
 
-        <div className="overflow-hidden rounded border border-gray-200">
+        <div className="overflow-hidden rounded-lg border border-border bg-card text-card-foreground shadow-sm">
           <table className="w-full text-left text-sm">
-            <thead className="bg-gray-50 text-gray-700">
+            <thead className="bg-muted/50 text-muted-foreground">
               <tr>
-                <th className="border-b border-gray-200 px-4 py-3 font-semibold">Name</th>
-                <th className="border-b border-gray-200 px-4 py-3 font-semibold">Tags</th>
-                <th className="border-b border-gray-200 px-4 py-3 font-semibold">Resolutions</th>
-                <th className="border-b border-gray-200 px-4 py-3 font-semibold">Duration</th>
-                <th className="border-b border-gray-200 px-4 py-3 font-semibold">Created at</th>
-                <th className="border-b border-gray-200 px-4 py-3 font-semibold">Playlist</th>
-                <th className="border-b border-gray-200 px-4 py-3 font-semibold">Thumbnail</th>
+                <th className="border-b border-border px-4 py-3 font-medium">Name</th>
+                <th className="border-b border-border px-4 py-3 font-medium">Tags</th>
+                <th className="border-b border-border px-4 py-3 font-medium">Resolutions</th>
+                <th className="border-b border-border px-4 py-3 font-medium">Duration</th>
+                <th className="border-b border-border px-4 py-3 font-medium">Created at</th>
+                <th className="border-b border-border px-4 py-3 font-medium">Playlist</th>
+                <th className="border-b border-border px-4 py-3 font-medium">Thumbnail</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
+            <tbody className="divide-y divide-border">
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-gray-500">Loading...</td>
+                  <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">Loading...</td>
                 </tr>
               ) : videos.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-gray-500">No videos found.</td>
+                  <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">No videos found.</td>
                 </tr>
               ) : (
                 videos.map((video, idx) => (
-                  <tr key={idx} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium text-gray-900">{video.name}</td>
+                  <tr key={idx} className="hover:bg-muted/50 transition-colors">
+                    <td className="px-4 py-3 font-medium">{video.name}</td>
                     <td className="px-4 py-3">
                       <div className="flex flex-wrap gap-1">
                         {video.tags.map((tag, i) => (
-                          <span key={i} className="rounded-full bg-gray-200 px-2 py-0.5 text-xs text-gray-700">
+                          <span key={i} className="inline-flex items-center rounded-full border border-transparent bg-secondary px-2 py-0.5 text-xs font-semibold text-secondary-foreground transition-colors hover:bg-secondary/80">
                             {tag}
                           </span>
                         ))}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-gray-600">
+                    <td className="px-4 py-3 text-muted-foreground">
                       {video.available_resolutions.join(', ')}
                     </td>
-                    <td className="px-4 py-3 tabular-nums text-gray-600">
+                    <td className="px-4 py-3 tabular-nums text-muted-foreground">
                       {formatDuration(video.duration)}
                     </td>
-                    <td className="px-4 py-3 text-gray-600">
+                    <td className="px-4 py-3 text-muted-foreground">
                       {video.created_at}
                     </td>
                     <td className="px-4 py-3">
@@ -199,12 +198,12 @@ export default function Videos() {
                           href={video.playlist_url} 
                           target="_blank" 
                           rel="noopener noreferrer"
-                          className="text-blue-600 hover:underline"
+                          className="text-primary hover:underline"
                         >
                           Open
                         </a>
                       ) : (
-                        <span className="text-gray-400">N/A</span>
+                        <span className="text-muted-foreground">N/A</span>
                       )}
                     </td>
                     <td className="px-4 py-3">
@@ -214,11 +213,11 @@ export default function Videos() {
                           <img 
                             src={video.thumbnail_url} 
                             alt="Thumbnail" 
-                            className="h-12 w-20 rounded border border-gray-200 object-cover"
+                            className="h-12 w-20 rounded border border-border object-cover"
                           />
                         </a>
                       ) : (
-                        <span className="text-xs text-gray-400">No thumbnail</span>
+                        <span className="text-xs text-muted-foreground">No thumbnail</span>
                       )}
                     </td>
                   </tr>
@@ -231,21 +230,23 @@ export default function Videos() {
         <div className="mt-4 flex items-center justify-between">
           <div className="flex gap-2">
             <Button 
-              variant="secondary" 
+              variant="outline" 
+              size="sm"
               disabled={!hasPrev || loading}
               onClick={() => setPage(p => Math.max(1, p - 1))}
             >
               Prev
             </Button>
             <Button 
-              variant="secondary" 
+              variant="outline" 
+              size="sm"
               disabled={!hasNext || loading}
               onClick={() => setPage(p => p + 1)}
             >
               Next
             </Button>
           </div>
-          <div className="text-sm text-gray-500">
+          <div className="text-sm text-muted-foreground">
             {total > 0 ? (
               <>
                 Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total} videos

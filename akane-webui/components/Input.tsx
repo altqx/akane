@@ -13,20 +13,20 @@ const Input = forwardRef<HTMLInputElement, InputProps>(({
   ...props 
 }, ref) => {
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-2">
       {label && (
-        <label htmlFor={id} className="text-sm font-medium text-gray-700">
+        <label htmlFor={id} className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-foreground">
           {label}
         </label>
       )}
       <input
         ref={ref}
         id={id}
-        className={`px-3 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600 ${className}`}
+        className={`flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
         {...props}
       />
       {hint && (
-        <p className="text-xs text-gray-500">{hint}</p>
+        <p className="text-[0.8rem] text-muted-foreground">{hint}</p>
       )}
     </div>
   );

@@ -149,7 +149,7 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-white p-10 font-sans text-gray-900">
+    <div className="min-h-screen bg-background p-10 font-sans text-foreground">
       <div className="mx-auto max-w-2xl">
         <h1 className="mb-6 text-3xl font-bold">Akane Video Uploader</h1>
         
@@ -166,8 +166,8 @@ export default function Home() {
             disabled={isUploading}
           />
 
-          <div className="flex flex-col gap-1">
-            <label htmlFor="fileInput" className="text-sm font-medium text-gray-700">
+          <div className="flex flex-col gap-2">
+            <label htmlFor="fileInput" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-foreground">
               Video Files *
             </label>
             <input
@@ -179,21 +179,21 @@ export default function Home() {
               required
               onChange={handleFileChange}
               disabled={isUploading}
-              className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200"
+              className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
             />
-            <p className="text-xs text-gray-500">Select one or more video files</p>
+            <p className="text-[0.8rem] text-muted-foreground">Select one or more video files</p>
           </div>
 
           {files.length > 0 && (
-            <div className="rounded bg-gray-50 p-4">
+            <div className="rounded-md border border-border bg-card p-4 text-card-foreground">
               <div className="flex flex-col gap-2">
                 {files.map((file, idx) => (
-                  <div key={idx} className="flex items-center justify-between border-b border-gray-200 py-2 last:border-0">
+                  <div key={idx} className="flex items-center justify-between border-b border-border py-2 last:border-0">
                     <div>
-                      <div className="font-medium text-gray-800">{file.name}</div>
-                      <div className="text-xs text-gray-500">{formatFileSize(file.size)}</div>
+                      <div className="font-medium">{file.name}</div>
+                      <div className="text-xs text-muted-foreground">{formatFileSize(file.size)}</div>
                     </div>
-                    <div className="text-xs text-gray-500">Pending</div>
+                    <div className="text-xs text-muted-foreground">Pending</div>
                   </div>
                 ))}
               </div>
@@ -233,7 +233,7 @@ export default function Home() {
         </form>
 
         {error && (
-          <div className="mt-6 rounded bg-red-50 p-4 text-red-700">
+          <div className="mt-6 rounded-md bg-destructive/15 p-4 text-destructive">
             {error}
           </div>
         )}
@@ -245,26 +245,26 @@ export default function Home() {
               {results.map((result, idx) => (
                 <div 
                   key={idx} 
-                  className={`rounded p-4 ${result.success ? 'bg-green-50' : 'bg-red-50'}`}
+                  className={`rounded-md border p-4 ${result.success ? 'border-green-500/20 bg-green-500/10' : 'border-destructive/20 bg-destructive/10'}`}
                 >
-                  <div className="font-medium text-gray-900">{result.file}</div>
+                  <div className="font-medium">{result.file}</div>
                   {result.success && result.data ? (
                     <div className="mt-2 text-sm">
-                      <span className="text-green-700">✓ Uploaded successfully!</span>
+                      <span className="text-green-500">✓ Uploaded successfully!</span>
                       <div className="mt-1">
-                        <span className="font-medium text-gray-700">Playlist URL: </span>
+                        <span className="font-medium text-muted-foreground">Playlist URL: </span>
                         <a 
                           href={result.data.playlist_url} 
                           target="_blank" 
                           rel="noopener noreferrer"
-                          className="text-blue-600 hover:underline break-all"
+                          className="text-primary hover:underline break-all"
                         >
                           {result.data.playlist_url}
                         </a>
                       </div>
                     </div>
                   ) : (
-                    <div className="mt-2 text-sm text-red-700">
+                    <div className="mt-2 text-sm text-destructive">
                       ✗ Failed: {result.error}
                     </div>
                   )}
