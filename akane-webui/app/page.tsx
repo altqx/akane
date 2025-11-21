@@ -1,150 +1,49 @@
 'use client';
 
-import { useState, useRef, FormEvent } from 'react';
+import { useRef, FormEvent } from 'react';
 import Navbar from '@/components/Navbar';
 import Button from '@/components/Button';
 import Input from '@/components/Input';
 import ProgressBar from '@/components/ProgressBar';
-
-interface UploadResult {
-  file: string;
-  success: boolean;
-  data?: {
-    playlist_url: string;
-    upload_id: string;
-  };
-  error?: string;
-}
-
-interface ProgressData {
-  percentage: number;
-  stage: string;
-  current_chunk: number;
-  total_chunks: number;
-}
+import { useUpload } from '@/context/UploadContext';
+import { formatFileSize } from '@/utils/format';
 
 export default function Home() {
-  const [files, setFiles] = useState<File[]>([]);
-  const [tags, setTags] = useState('');
-  const [isUploading, setIsUploading] = useState(false);
-  const [progress, setProgress] = useState<ProgressData | null>(null);
-  const [results, setResults] = useState<UploadResult[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [uploadStatus, setUploadStatus] = useState<string>('');
+  const {
+    files,
+    setFiles,
+    tags,
+    setTags,
+    isUploading,
+    progress,
+    results,
+    error,
+    setError,
+    uploadStatus,
+    startUpload,
+    clearUploads
+  } = useUpload();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       setFiles(Array.from(e.target.files));
-      setResults([]);
+      // We don't clear results here anymore to allow persistence across navigation
+      // But if user selects new files, maybe we should clear previous results?
+      // Let's keep previous results until they hit upload or clear explicitly
       setError(null);
-      setProgress(null);
-    }
-  };
-
-  const formatFileSize = (bytes: number) => {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
-  };
-
-  const pollProgress = async (uploadId: string) => {
-    try {
-      const token = localStorage.getItem('admin_token');
-      const res = await fetch(`/api/progress/${uploadId}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data) {
-        setProgress(data);
-      }
-    } catch (err) {
-      console.error('Progress poll error:', err);
     }
   };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (files.length === 0) {
-      setError('Please select at least one video file.');
-      return;
-    }
+    await startUpload();
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
 
-    setIsUploading(true);
-    setResults([]);
-    setError(null);
-    
-    const newResults: UploadResult[] = [];
-
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      setUploadStatus(`Uploading ${i + 1} of ${files.length}: ${file.name}`);
-      setProgress(null);
-
-      // Generate a client-side ID for progress tracking
-      const uploadId = crypto.randomUUID();
-
-      // Start polling immediately
-      const pollInterval = setInterval(() => {
-        pollProgress(uploadId);
-      }, 500);
-
-      try {
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('name', file.name.replace(/\.[^/.]+$/, ''));
-        if (tags.trim()) {
-          formData.append('tags', tags.trim());
-        }
-
-        // Start upload request with X-Upload-ID header
-        const token = localStorage.getItem('admin_token');
-        const res = await fetch('/api/upload', {
-          method: 'POST',
-          headers: {
-            'X-Upload-ID': uploadId,
-            'Authorization': `Bearer ${token}`
-          },
-          body: formData,
-        });
-
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || 'Upload failed');
-        }
-
-        const data = await res.json();
-        
-        newResults.push({
-          file: file.name,
-          success: true,
-          data: data
-        });
-
-      } catch (err: unknown) {
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        newResults.push({
-          file: file.name,
-          success: false,
-          error: errorMessage
-        });
-      } finally {
-        clearInterval(pollInterval);
-      }
-      
-    }
-
-    setResults(newResults);
-    setIsUploading(false);
-    setUploadStatus('');
-    setProgress(null);
-    setFiles([]); // Clear files on success? Or keep them? Let's clear.
+  const handleClear = () => {
+    clearUploads();
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -204,16 +103,11 @@ export default function Home() {
             <Button type="submit" disabled={isUploading || files.length === 0} className="flex-1">
               {isUploading ? uploadStatus : 'Upload All'}
             </Button>
-            <Button 
-              type="button" 
-              variant="secondary" 
+            <Button
+              type="button"
+              variant="secondary"
               disabled={isUploading}
-              onClick={() => {
-                setFiles([]);
-                setResults([]);
-                setError(null);
-                if (fileInputRef.current) fileInputRef.current.value = '';
-              }}
+              onClick={handleClear}
               className="flex-1"
             >
               Clear
