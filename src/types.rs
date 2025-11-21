@@ -30,6 +30,7 @@ pub struct AppState {
     pub db_pool: SqlitePool,
     pub progress: ProgressMap,
     pub secret_key: String,
+    pub admin_password: String,
 }
 
 #[derive(Serialize)]

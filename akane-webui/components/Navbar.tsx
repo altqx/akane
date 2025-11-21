@@ -10,17 +10,17 @@ export default function Navbar() {
     <nav className="mb-8 border-b border-gray-200 pb-4">
       <div className="flex gap-6">
         <Link 
-          href="/admin-webui" 
+          href="/"
           className={`text-sm font-medium transition-colors hover:text-black ${
-            isActive('/admin-webui') ? 'text-black' : 'text-gray-500'
+            isActive('/') ? 'text-black' : 'text-gray-500'
           }`}
         >
           Uploader
         </Link>
         <Link 
-          href="/admin-webui/videos" 
+          href="/videos"
           className={`text-sm font-medium transition-colors hover:text-black ${
-            isActive('/admin-webui/videos') ? 'text-black' : 'text-gray-500'
+            isActive('/videos') ? 'text-black' : 'text-gray-500'
           }`}
         >
           Videos

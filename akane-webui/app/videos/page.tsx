@@ -51,7 +51,12 @@ export default function Videos() {
     if (tagFilter) params.set('tag', tagFilter);
 
     try {
-      const res = await fetch(`/api/videos?${params.toString()}`);
+      const token = localStorage.getItem('admin_token');
+      const res = await fetch(`/api/videos?${params.toString()}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || 'Request failed');

@@ -4,30 +4,41 @@ import { useState } from 'react';
 import Input from '@/components/Input';
 import Button from '@/components/Button';
 
-export default function AdminLayout({
+export default function AuthWrapper({
   children,
 }: {
   children: React.ReactNode;
 }) {
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
     if (typeof window !== 'undefined') {
-      const auth = localStorage.getItem('admin_auth');
-      return auth === 'true';
+      const auth = localStorage.getItem('admin_token');
+      return !!auth;
     }
     return false;
   });
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Hardcoded password as requested
-    if (password === 'akane-admin-2025') {
-      localStorage.setItem('admin_auth', 'true');
-      setIsAuthenticated(true);
-      setError('');
-    } else {
-      setError('Invalid password');
+    setError('');
+
+    try {
+      const res = await fetch('/api/auth/check', {
+        headers: {
+          'Authorization': `Bearer ${password}`
+        }
+      });
+
+      if (res.ok) {
+        localStorage.setItem('admin_token', password);
+        setIsAuthenticated(true);
+      } else {
+        setError('Invalid password');
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Login failed');
     }
   };
 

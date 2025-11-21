@@ -9,7 +9,12 @@ use aws_sdk_s3::{Client as S3Client, config::Region};
 use axum::extract::DefaultBodyLimit;
 use axum::{
     Router,
+    extract::{Request, State},
+    middleware::{self, Next},
+    response::Response,
+    http::{StatusCode, header},
     routing::{delete, get, post},
+    response::Redirect,
 };
 use dotenv::dotenv;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
@@ -20,6 +25,28 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
 use types::AppState;
+
+async fn auth_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let auth_header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|header| header.to_str().ok());
+
+    let expected_auth = format!("Bearer {}", state.admin_password);
+
+    match auth_header {
+        Some(auth) if auth == expected_auth => Ok(next.run(req).await),
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+async fn check_auth() -> Result<(), StatusCode> {
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -65,6 +92,12 @@ async fn main() -> Result<()> {
         Uuid::new_v4().to_string()
     });
 
+    let admin_password = std::env::var("ADMIN_PASSWORD").unwrap_or_else(|_| {
+        let pass = Uuid::new_v4().to_string();
+        info!("ADMIN_PASSWORD not set, generated random password: {}", pass);
+        pass
+    });
+
     let state = AppState {
         s3,
         bucket: r2_bucket,
@@ -72,16 +105,26 @@ async fn main() -> Result<()> {
         db_pool,
         progress: progress.clone(),
         secret_key,
+        admin_password,
     };
 
+    let api_routes = Router::new()
+        .route("/upload", post(handlers::upload_video))
+        .route("/progress/{upload_id}", get(handlers::get_progress))
+        .route("/videos", get(handlers::list_videos))
+        .route("/auth/check", get(check_auth))
+        //.route("/purge", delete(handlers::purge_bucket))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
     let app = Router::new()
-        .route("/api/upload", post(handlers::upload_video))
-        .route("/api/progress/{upload_id}", get(handlers::get_progress))
-        .route("/api/videos", get(handlers::list_videos))
-        //.route("/api/purge", delete(handlers::purge_bucket))
+        .nest("/api", api_routes)
         .route("/hls/{id}/{*file}", get(handlers::get_hls_file))
         .route("/player/{id}", get(handlers::get_player))
-        .fallback_service(ServeDir::new("public"))
+        .nest_service("/admin-webui", ServeDir::new("webui"))
+        .route("/", get(|| async { Redirect::permanent("https://altqx.com/") }))
         // e.g. 1 GB body limit
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(state);
