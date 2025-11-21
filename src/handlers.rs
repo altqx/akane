@@ -325,7 +325,7 @@ fn verify_token(
     }
 
     // Verify signature
-    let payload = format!("{}:{}:{}:{}", video_id, expiration, ip, user_agent);
+    let payload = format!("{}\x1F{}\x1F{}\x1F{}", video_id, expiration, ip, user_agent);
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(payload.as_bytes());
@@ -364,13 +364,15 @@ pub async fn get_hls_file(
             }
         }
 
-        let ip = addr.ip().to_string();
-        let user_agent = headers
-            .get(header::USER_AGENT)
+        // Try to get the real client IP from X-Forwarded-For header, fallback to addr.ip()
+        let ip = headers
+            .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+            .and_then(|xff| xff.split(',').next().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| addr.ip().to_string());
 
-        if !verify_token(&id, token, &state.secret_key, &ip, user_agent) {
+        if !verify_token(&id, token, &state.secret_key, &ip) {
             return Err((
                 StatusCode::FORBIDDEN,
                 "Access denied: Invalid or expired token".to_string(),
@@ -573,7 +575,7 @@ mod tests {
         use sha2::Sha256;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-         // Manual token construction with expired time
+// Manual token construction with expired time
         let secret = "my_secret_key";
         let video_id = "video123";
         let ip = "127.0.0.1";
