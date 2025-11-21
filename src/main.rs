@@ -50,13 +50,15 @@ async fn check_auth() -> Result<(), StatusCode> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenv().ok();
+
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,akane=debug".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
-
-    dotenv().ok();
-    dotenv().expect("Failed to load .env file");
 
     let r2_endpoint = std::env::var("R2_ENDPOINT").context(
         "R2_ENDPOINT env var required (e.g. https://<accountid>.r2.cloudflarestorage.com)",
@@ -101,6 +103,13 @@ async fn main() -> Result<()> {
         pass
     });
 
+    // Limit concurrent FFmpeg processes (configurable via env, default 1)
+    let max_concurrent = std::env::var("MAX_CONCURRENT_ENCODES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1);
+    let ffmpeg_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+
     let state = AppState {
         s3,
         bucket: r2_bucket,
@@ -110,6 +119,7 @@ async fn main() -> Result<()> {
         secret_key,
         admin_password,
         active_viewers: Arc::new(RwLock::new(HashMap::new())),
+        ffmpeg_semaphore,
     };
 
     let public_routes = Router::new()
@@ -147,6 +157,7 @@ async fn main() -> Result<()> {
         )
         // e.g. 1 GB body limit
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
+        .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
 
     let addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();

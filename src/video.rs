@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::{fs, process::Command};
-use tracing::info;
+use tracing::{error, info};
 
 pub async fn get_video_height(input: &PathBuf) -> Result<u32> {
     let output = Command::new("ffprobe")
@@ -93,6 +93,7 @@ pub async fn encode_to_hls(
     out_dir: &PathBuf,
     progress: &ProgressMap,
     upload_id: &str,
+    semaphore: Arc<Semaphore>,
 ) -> Result<()> {
     fs::create_dir_all(out_dir).await?;
 
@@ -113,13 +114,6 @@ pub async fn encode_to_hls(
     } else {
         "veryfast" // libx264/libx265 preset
     };
-
-    // Limit concurrent FFmpeg processes (configurable via env, default 3)
-    let max_concurrent = std::env::var("MAX_CONCURRENT_ENCODES")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(3);
-    let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
     // Encode all variants in parallel
     let input = Arc::new(input.clone());
@@ -158,7 +152,11 @@ pub async fn encode_to_hls(
             let scale_filter = format!("scale=-2:{}", variant.height);
 
             let mut cmd = Command::new("ffmpeg");
-            cmd.arg("-y")
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .arg("-loglevel")
+                .arg("error")
+                .arg("-y")
                 .arg("-i")
                 .arg(input.as_ref())
                 .arg("-c:v")
@@ -211,14 +209,16 @@ pub async fn encode_to_hls(
                 .arg(&segment_pattern)
                 .arg(&playlist_path);
 
-            let status = cmd.status()
+            let output = cmd.output()
                 .await
                 .context("failed to run ffmpeg")?;
 
-            if !status.success() {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                error!("FFmpeg failed for variant {}: {}", variant.label, stderr);
                 anyhow::bail!(
                     "ffmpeg exited with status: {} for variant {}",
-                    status,
+                    output.status,
                     variant.label
                 );
             }
@@ -254,7 +254,11 @@ pub async fn encode_to_hls(
         let thumb_path = out_dir_thumb.join("thumbnail.jpg");
         info!("Generating thumbnail: {:?}", thumb_path);
 
-        let thumb_status = Command::new("ffmpeg")
+        let thumb_output = Command::new("ffmpeg")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .arg("-loglevel")
+            .arg("error")
             .arg("-y")
             .arg("-ss")
             .arg("0")
@@ -265,12 +269,13 @@ pub async fn encode_to_hls(
             .arg("-q:v")
             .arg("20")
             .arg(&thumb_path)
-            .status()
+            .output()
             .await
             .context("failed to generate thumbnail")?;
 
-        if !thumb_status.success() {
-            tracing::error!("Thumbnail generation failed, but continuing...");
+        if !thumb_output.status.success() {
+            let stderr = String::from_utf8_lossy(&thumb_output.stderr);
+            error!("Thumbnail generation failed: {}", stderr);
         }
 
         Ok::<_, anyhow::Error>(())

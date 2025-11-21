@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ProgressUpdate {
@@ -36,6 +36,7 @@ pub struct AppState {
     pub secret_key: String,
     pub admin_password: String,
     pub active_viewers: Arc<RwLock<HashMap<String, HashMap<String, std::time::Instant>>>>,
+    pub ffmpeg_semaphore: Arc<Semaphore>,
 }
 
 #[derive(Serialize, Clone, Debug)]

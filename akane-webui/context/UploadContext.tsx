@@ -80,16 +80,31 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       // Create a promise that resolves when processing is complete
       const processingPromise = new Promise<{ player_url: string; upload_id: string }>((resolve, reject) => {
         const eventSource = new EventSource(`/api/progress/${uploadId}`)
+        let timeoutId: NodeJS.Timeout
+
+        // Set a timeout to reject if we don't get any messages for a while
+        const resetTimeout = () => {
+          if (timeoutId) clearTimeout(timeoutId)
+          timeoutId = setTimeout(() => {
+            eventSource.close()
+            reject(new Error('Connection timed out waiting for progress updates'))
+          }, 60000) // 60 seconds timeout
+        }
+
+        resetTimeout()
 
         eventSource.onmessage = (event) => {
+          resetTimeout()
           try {
             const data: ProgressData = JSON.parse(event.data)
             setProgress(data)
 
             if (data.status === 'completed' && data.result) {
+              if (timeoutId) clearTimeout(timeoutId)
               eventSource.close()
               resolve(data.result)
             } else if (data.status === 'failed') {
+              if (timeoutId) clearTimeout(timeoutId)
               eventSource.close()
               reject(new Error(data.error || 'Processing failed'))
             }
@@ -98,12 +113,14 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           }
         }
 
-        eventSource.onerror = () => {
-          // If connection drops, we might want to retry or just wait.
-          // For now, if it's a hard error, we might reject, but SSE often reconnects.
-          // Let's rely on the backend sending a final status.
-          // However, if we never get a connection, we should timeout.
-        }
+        eventSource.addEventListener('error', (e: Event) => {
+          // Check if it's a fatal error or just a reconnect
+          if (eventSource.readyState === EventSource.CLOSED) {
+            if (timeoutId) clearTimeout(timeoutId)
+            // Only reject if we haven't completed yet
+            reject(new Error('Connection to progress stream closed unexpectedly'))
+          }
+        })
       })
 
       try {

@@ -43,6 +43,25 @@ pub async fn upload_video(
         .map(|s| s.to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
+    // Initialize progress immediately to avoid race condition with SSE
+    {
+        let initial_progress = ProgressUpdate {
+            stage: "Initializing upload".to_string(),
+            current_chunk: 0,
+            total_chunks: 1,
+            percentage: 0,
+            details: Some("Waiting for file data...".to_string()),
+            status: "initializing".to_string(),
+            result: None,
+            error: None,
+        };
+        state
+            .progress
+            .write()
+            .await
+            .insert(upload_id.clone(), initial_progress);
+    }
+
     while let Some(mut field) = multipart
         .next_field()
         .await
@@ -206,6 +225,7 @@ pub async fn upload_video(
                 &hls_dir,
                 &state_clone.progress,
                 &upload_id_clone,
+                state_clone.ffmpeg_semaphore.clone(),
             )
             .await?;
 
@@ -310,6 +330,9 @@ pub async fn get_progress(
     Path(upload_id): Path<String>,
 ) -> Sse<impl Stream<Item = Result<Event, anyhow::Error>> + Send> {
     let stream = async_stream::stream! {
+        let start_time = std::time::Instant::now();
+        let timeout = Duration::from_secs(60); // Wait up to 60s for upload to start
+
         loop {
             let progress = {
                 let progress_map = state.progress.read().await;
@@ -333,15 +356,17 @@ pub async fn get_progress(
                 yield Ok(Event::default().data(json));
 
                 if p.status == "completed" || p.status == "failed" {
+                    // Wait a bit to ensure client receives the message before closing
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     break;
                 }
             } else {
-                // If not found, maybe it's done or invalid.
-                // For now, we can yield an error or just break.
-                // Let's assume if it's not found it might be finished or not started.
-                // But usually it should be there. 
-                yield Ok(Event::default().event("error").data("Upload ID not found"));
-                break;
+                // If not found, check if we timed out waiting for it to start
+                if start_time.elapsed() > timeout {
+                    yield Ok(Event::default().event("error").data("Upload ID not found (timeout)"));
+                    break;
+                }
+                // Otherwise just wait and retry
             }
 
             tokio::time::sleep(Duration::from_millis(500)).await;
