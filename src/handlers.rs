@@ -7,11 +7,12 @@ use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, g
 // use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use axum::{
     Json,
-    extract::{Multipart, Path, Query, State},
+    extract::{ConnectInfo, Multipart, Path, Query, State},
     http::{StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
 use minify_js::{Session, TopLevelMode, minify};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio::{fs, io::AsyncWriteExt};
 use tracing::error;
@@ -273,7 +274,7 @@ use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Helper to generate a signed token
-fn generate_token(video_id: &str, secret: &str) -> String {
+fn generate_token(video_id: &str, secret: &str, ip: &str, user_agent: &str) -> String {
     // Token valid for 1 hour (3600 seconds)
     let expiration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -281,7 +282,7 @@ fn generate_token(video_id: &str, secret: &str) -> String {
         .as_secs()
         + 3600;
 
-    let payload = format!("{}:{}", video_id, expiration);
+    let payload = format!("{}:{}:{}:{}", video_id, expiration, ip, user_agent);
 
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
@@ -293,7 +294,13 @@ fn generate_token(video_id: &str, secret: &str) -> String {
 }
 
 // Helper to verify a signed token
-fn verify_token(video_id: &str, token: &str, secret: &str) -> bool {
+fn verify_token(
+    video_id: &str,
+    token: &str,
+    secret: &str,
+    ip: &str,
+    user_agent: &str,
+) -> bool {
     let parts: Vec<&str> = token.split(':').collect();
     if parts.len() != 2 {
         return false;
@@ -318,7 +325,7 @@ fn verify_token(video_id: &str, token: &str, secret: &str) -> bool {
     }
 
     // Verify signature
-    let payload = format!("{}:{}", video_id, expiration);
+    let payload = format!("{}:{}:{}:{}", video_id, expiration, ip, user_agent);
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(payload.as_bytes());
@@ -330,6 +337,7 @@ fn verify_token(video_id: &str, token: &str, secret: &str) -> bool {
 
 pub async fn get_hls_file(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     Path((id, file)): Path<(String, String)>,
 ) -> Result<Response, (StatusCode, String)> {
@@ -356,7 +364,13 @@ pub async fn get_hls_file(
             }
         }
 
-        if !verify_token(&id, token, &state.secret_key) {
+        let ip = addr.ip().to_string();
+        let user_agent = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if !verify_token(&id, token, &state.secret_key, &ip, user_agent) {
             return Err((
                 StatusCode::FORBIDDEN,
                 "Access denied: Invalid or expired token".to_string(),
@@ -402,10 +416,18 @@ pub async fn get_hls_file(
 
 pub async fn get_player(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let ip = addr.ip().to_string();
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
     // Generate token
-    let token = generate_token(&id, &state.secret_key);
+    let token = generate_token(&id, &state.secret_key, &ip, user_agent);
 
     let js_code = format!(
         r#"
@@ -495,4 +517,79 @@ pub async fn get_player(
     );
 
     ([(header::SET_COOKIE, cookie)], Html(html))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_token_verification_success() {
+        let secret = "my_secret_key";
+        let video_id = "video123";
+        let ip = "127.0.0.1";
+        let ua = "Mozilla/5.0";
+
+        let token = generate_token(video_id, secret, ip, ua);
+        assert!(verify_token(video_id, &token, secret, ip, ua));
+    }
+
+    #[test]
+    fn test_token_verification_fail_wrong_ip() {
+        let secret = "my_secret_key";
+        let video_id = "video123";
+        let ip = "127.0.0.1";
+        let ua = "Mozilla/5.0";
+
+        let token = generate_token(video_id, secret, ip, ua);
+        assert!(!verify_token(video_id, &token, secret, "192.168.1.1", ua));
+    }
+
+    #[test]
+    fn test_token_verification_fail_wrong_ua() {
+        let secret = "my_secret_key";
+        let video_id = "video123";
+        let ip = "127.0.0.1";
+        let ua = "Mozilla/5.0";
+
+        let token = generate_token(video_id, secret, ip, ua);
+        assert!(!verify_token(video_id, &token, secret, ip, "curl/7.68.0"));
+    }
+
+    #[test]
+    fn test_token_verification_fail_wrong_secret() {
+        let secret = "my_secret_key";
+        let video_id = "video123";
+        let ip = "127.0.0.1";
+        let ua = "Mozilla/5.0";
+
+        let token = generate_token(video_id, secret, ip, ua);
+        assert!(!verify_token(video_id, &token, "wrong_secret", ip, ua));
+    }
+
+    #[test]
+    fn test_token_verification_expired() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+         // Manual token construction with expired time
+        let secret = "my_secret_key";
+        let video_id = "video123";
+        let ip = "127.0.0.1";
+        let ua = "Mozilla/5.0";
+
+        let expiration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() - 100; // Expired
+
+        let payload = format!("{}:{}:{}:{}", video_id, expiration, ip, ua);
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+        mac.update(payload.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let token = format!("{}:{}", expiration, signature);
+
+        assert!(!verify_token(video_id, &token, secret, ip, ua));
+    }
 }
