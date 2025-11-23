@@ -82,24 +82,12 @@ pub async fn get_view_counts(
         return Ok(HashMap::new());
     }
 
-    // ClickHouse doesn't support passing array directly in WHERE IN easily with the typed client in this version sometimes,
-    // but let's try the standard parameter binding or formatting the query.
-    // For simplicity and safety with a small list, we can format the string (ids are UUIDs usually).
-    // A safer way is using a temporary table or just fetching all if the dataset is small, but let's filter.
+    // Use ClickHouse client's parameter binding for safer query execution
+    let query =
+        "SELECT video_id, count(*) as count FROM views WHERE video_id IN ? GROUP BY video_id";
 
-    // Let's just fetch counts for these IDs.
-    let ids_str = video_ids
-        .iter()
-        .map(|id| format!("'{}'", id))
-        .collect::<Vec<_>>()
-        .join(",");
+    let mut cursor = client.query(query).bind(video_ids).fetch::<ViewCount>()?;
 
-    let query = format!(
-        "SELECT video_id, count(*) as count FROM views WHERE video_id IN ({}) GROUP BY video_id",
-        ids_str
-    );
-
-    let mut cursor = client.query(&query).fetch::<ViewCount>()?;
     let mut counts = HashMap::new();
 
     while let Some(row) = cursor.next().await? {
