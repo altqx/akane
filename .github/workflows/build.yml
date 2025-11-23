@@ -1,4 +1,7 @@
-name: Build
+name: Build and Release
+
+permissions:
+  contents: write
 
 on:
   push:
@@ -10,6 +13,42 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      version_changed: ${{ steps.compare_versions.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get current version
+        id: get_version
+        run: |
+          VERSION=$(grep "^version" Cargo.toml | head -n 1 | cut -d '"' -f 2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if version has changed
+        id: compare_versions
+        run: |
+          CURRENT_VERSION="${{ steps.get_version.outputs.version }}"
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+
+          if [ "$LATEST_TAG" = "none" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "First release: $CURRENT_VERSION"
+          else
+            LATEST_VERSION=${LATEST_TAG#v}
+            if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
+              echo "changed=false" >> $GITHUB_OUTPUT
+              echo "Version unchanged: $CURRENT_VERSION"
+            else
+              echo "changed=true" >> $GITHUB_OUTPUT
+              echo "Version bumped from $LATEST_VERSION to $CURRENT_VERSION"
+            fi
+          fi
+
   build-frontend:
     runs-on: ubuntu-latest
     steps:
@@ -86,20 +125,11 @@ jobs:
           mkdir dist
           cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/
           cp -r webui dist/
-          # Copy migrations if they weren't embedded, but they are.
-          # Copy example config if exists
           if [ -f config.yml.example ]; then
             cp config.yml.example dist/config.yml
           fi
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/
-
       - name: Zip artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           cd dist
@@ -109,13 +139,39 @@ jobs:
             zip -r ../${{ matrix.artifact_name }}.zip *
           fi
 
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: ${{ matrix.artifact_name }}.zip
-          tag_name: v${{ github.run_number }}
-          name: v${{ github.run_number }}
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.zip
+
+  create-release:
+    needs: [check-version, build-backend]
+    if: needs.check-version.outputs.version_changed == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: akane-linux-amd64
+          path: ./artifacts
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: akane-windows-amd64
+          path: ./artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: v${{ needs.check-version.outputs.version }}
+          files: artifacts/*
           draft: false
           prerelease: false
         env:
