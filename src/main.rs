@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
     let db_pool = database::initialize_database(database_url).await?;
 
     let clickhouse_client = clickhouse::initialize_client(&config.clickhouse);
-    clickhouse::create_schema(&clickhouse_client).await?;
+    clickhouse::create_schema(&clickhouse_client, &config.clickhouse).await?;
 
     let progress = Arc::new(RwLock::new(HashMap::new()));
 

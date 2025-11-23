@@ -21,8 +21,21 @@ pub fn initialize_client(config: &ClickHouseConfig) -> Client {
         .with_database(&config.database)
 }
 
-pub async fn create_schema(client: &Client) -> Result<()> {
+pub async fn create_schema(client: &Client, config: &ClickHouseConfig) -> Result<()> {
     info!("Initializing ClickHouse schema...");
+
+    let temp_client = Client::default()
+        .with_url(&config.url)
+        .with_user(&config.user)
+        .with_password(&config.password);
+    
+    temp_client
+        .query(&format!("CREATE DATABASE IF NOT EXISTS `{}`", config.database))
+        .execute()
+        .await
+        .context("Failed to create database in ClickHouse")?;
+    
+    info!("ClickHouse database `{}` ready", config.database);
 
     // Create views table
     client
