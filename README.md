@@ -1,3 +1,3 @@
 # Akane
 
-R2 videp uploader and player.
+R2 videos uploader and player.
