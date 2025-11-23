@@ -68,7 +68,7 @@ struct VideoRow {
     available_resolutions: String,
     duration: i64,
     thumbnail_key: String,
-    entrypoint: String,
+    //entrypoint: String,
     view_count: i64,
     created_at: String,
 }
@@ -288,3 +288,13 @@ pub async fn get_all_videos_summary(db_pool: &SqlitePool) -> Result<Vec<VideoSum
 
     Ok(rows)
 }
+
+/*
+pub async fn clear_database(db_pool: &SqlitePool) -> Result<()> {
+    let mut tx = db_pool.begin().await?;
+    sqlx::query("DELETE FROM views").execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM videos").execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+*/

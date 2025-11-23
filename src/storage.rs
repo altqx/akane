@@ -1,13 +1,20 @@
-use crate::types::AppState;
+use crate::types::{AppState, ProgressUpdate};
 use anyhow::{Context, Result};
-use aws_sdk_s3::presigning::PresigningConfig;
+//use aws_sdk_s3::presigning::PresigningConfig;
 use futures::stream::{self, StreamExt};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+//use std::time::Duration;
 use tokio::fs;
 use tracing::info;
 
-pub async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str) -> Result<String> {
+pub async fn upload_hls_to_r2(
+    state: &AppState,
+    hls_dir: &PathBuf,
+    prefix: &str,
+    upload_id: Option<&str>,
+) -> Result<String> {
     let mut master_playlist_key = None;
     let mut files_to_upload = Vec::new();
 
@@ -56,9 +63,14 @@ pub async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str)
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(30);
 
+    let total_files = files_to_upload.len() as u32;
+    let uploaded_count = Arc::new(AtomicU32::new(0));
+
     let upload_results: Vec<Result<String>> = stream::iter(files_to_upload)
         .map(|(path, key)| {
             let state = state.clone();
+            let uploaded_count = Arc::clone(&uploaded_count);
+            let upload_id = upload_id.map(|s| s.to_string());
             async move {
                 let body_bytes = fs::read(&path)
                     .await
@@ -75,6 +87,24 @@ pub async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str)
                     .with_context(|| format!("upload {}", key))?;
 
                 info!("Uploaded: {}", key);
+
+                // Update progress
+                let current = uploaded_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(id) = upload_id {
+                    let percentage = ((current as f32 / total_files as f32) * 100.0) as u32;
+                    let progress_update = ProgressUpdate {
+                        stage: "Upload to R2".to_string(),
+                        current_chunk: current,
+                        total_chunks: total_files,
+                        percentage,
+                        details: Some(format!("Uploaded {}/{} files", current, total_files)),
+                        status: "processing".to_string(),
+                        result: None,
+                        error: None,
+                    };
+                    state.progress.write().await.insert(id, progress_update);
+                }
+
                 Ok::<_, anyhow::Error>(key)
             }
         })
@@ -93,6 +123,7 @@ pub async fn upload_hls_to_r2(state: &AppState, hls_dir: &PathBuf, prefix: &str)
     Ok(playlist_key)
 }
 
+/*
 pub async fn generate_presigned_url(state: &AppState, key: &str) -> Result<String> {
     let presigning_config = PresigningConfig::expires_in(Duration::from_secs(3600))?;
 
@@ -106,3 +137,4 @@ pub async fn generate_presigned_url(state: &AppState, key: &str) -> Result<Strin
 
     Ok(presigned_request.uri().to_string())
 }
+*/

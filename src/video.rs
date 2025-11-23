@@ -149,6 +149,24 @@ pub async fn encode_to_hls(
                 variant.label, variant.height, variant.bitrate
             );
 
+            // Update progress before starting this variant
+            let current_chunk = (index + 1) as u32;
+            let percentage = (((current_chunk as f32) / (total_variants as f32)) * 100.0) as u32;
+            let start_progress = ProgressUpdate {
+                stage: "FFmpeg processing".to_string(),
+                current_chunk,
+                total_chunks: total_variants,
+                percentage,
+                details: Some(format!("Encoding variant: {} ({}p)", variant.label, variant.height)),
+                status: "processing".to_string(),
+                result: None,
+                error: None,
+            };
+            progress
+                .write()
+                .await
+                .insert(upload_id.clone(), start_progress);
+
             let scale_filter = format!("scale=-2:{}", variant.height);
 
             let mut cmd = Command::new("ffmpeg");

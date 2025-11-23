@@ -1,4 +1,4 @@
-use crate::database::{count_videos, list_videos as db_list_videos, save_video};
+use crate::database::{/*clear_database,*/ count_videos, list_videos as db_list_videos, save_video};
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
     AppState, ProgressResponse, ProgressUpdate, UploadAccepted, UploadResponse, VideoListResponse,
@@ -249,7 +249,7 @@ pub async fn upload_video(
             // Upload HLS to R2
             let prefix = format!("{}/", output_id);
             // Build public URL (pointing to our proxy)
-            let playlist_key = upload_hls_to_r2(&state_clone, &hls_dir, &prefix).await?;
+            let playlist_key = upload_hls_to_r2(&state_clone, &hls_dir, &prefix, Some(&upload_id_clone)).await?;
 
             // Save to database
             let thumbnail_key = format!("{}/thumbnail.jpg", output_id);
@@ -328,8 +328,23 @@ pub async fn upload_video(
 pub async fn get_progress(
     State(state): State<AppState>,
     Path(upload_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Sse<impl Stream<Item = Result<Event, anyhow::Error>> + Send> {
+    // Check for token in query params (for EventSource which can't set headers)
+    let is_authorized = if let Some(token) = params.get("token") {
+        let expected_auth = format!("Bearer {}", state.admin_password);
+        let provided_auth = format!("Bearer {}", token);
+        provided_auth == expected_auth
+    } else {
+        false
+    };
+
     let stream = async_stream::stream! {
+        if !is_authorized {
+            yield Ok(Event::default().event("error").data("Unauthorized"));
+            return;
+        }
+
         let start_time = std::time::Instant::now();
         let timeout = Duration::from_secs(60); // Wait up to 60s for upload to start
 
@@ -357,7 +372,7 @@ pub async fn get_progress(
 
                 if p.status == "completed" || p.status == "failed" {
                     // Wait a bit to ensure client receives the message before closing
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tokio::time::sleep(Duration::from_secs(3)).await;
                     break;
                 }
             } else {
@@ -523,7 +538,66 @@ pub async fn get_analytics_videos(
 
     Ok(Json(dtos))
 }
+/*
+pub async fn purge_bucket(
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let mut continuation_token = None;
 
+    loop {
+        let list_resp = state
+            .s3
+            .list_objects_v2()
+            .bucket(&state.bucket)
+            .set_continuation_token(continuation_token)
+            .send()
+            .await
+            .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+        if let Some(contents) = list_resp.contents {
+            if !contents.is_empty() {
+                let objects: Vec<ObjectIdentifier> = contents
+                    .into_iter()
+                    .filter_map(|o| {
+                        o.key.and_then(|k| ObjectIdentifier::builder().key(k).build().ok())
+                    })
+                    .collect();
+
+                if !objects.is_empty() {
+                    // Delete in batches of 1000 (S3 limit)
+                    for chunk in objects.chunks(1000) {
+                        let delete = Delete::builder()
+                            .set_objects(Some(chunk.to_vec()))
+                            .build()
+                            .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+                        state
+                            .s3
+                            .delete_objects()
+                            .bucket(&state.bucket)
+                            .delete(delete)
+                            .send()
+                            .await
+                            .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+                    }
+                }
+            }
+        }
+
+        if list_resp.is_truncated.unwrap_or(false) {
+            continuation_token = list_resp.next_continuation_token;
+        } else {
+            break;
+        }
+    }
+
+    clear_database(&state.db_pool)
+        .await
+        .map_err(|e| internal_err(e))?;
+
+    Ok(StatusCode::OK)
+}
+*/
 fn internal_err(e: anyhow::Error) -> (axum::http::StatusCode, String) {
     error!(error = ?e, "internal error");
     (

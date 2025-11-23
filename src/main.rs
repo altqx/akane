@@ -14,7 +14,7 @@ use axum::{
     middleware::{self, Next},
     response::Redirect,
     response::Response,
-    routing::{get, post},
+    routing::{/*delete,*/ get, post},
 };
 use dotenv::dotenv;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
@@ -126,11 +126,11 @@ async fn main() -> Result<()> {
         .route("/videos/{id}/heartbeat", post(handlers::heartbeat))
         .route("/analytics/realtime", get(handlers::get_realtime_analytics))
         .route("/analytics/history", get(handlers::get_analytics_history))
-        .route("/analytics/videos", get(handlers::get_analytics_videos));
+        .route("/analytics/videos", get(handlers::get_analytics_videos))
+        .route("/progress/{upload_id}", get(handlers::get_progress));
 
     let protected_routes = Router::new()
         .route("/upload", post(handlers::upload_video))
-        .route("/progress/{upload_id}", get(handlers::get_progress))
         .route("/videos", get(handlers::list_videos))
         .route("/auth/check", get(check_auth))
         //.route("/purge", delete(handlers::purge_bucket))
