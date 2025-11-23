@@ -1,6 +1,7 @@
 use crate::types::{VideoDto, VideoQuery};
 use anyhow::{Context, Result};
 use sqlx::{Sqlite, SqlitePool, migrate::MigrateDatabase};
+use std::collections::HashMap;
 use tracing::info;
 
 pub async fn initialize_database(database_url: &str) -> Result<SqlitePool> {
@@ -68,8 +69,6 @@ struct VideoRow {
     available_resolutions: String,
     duration: i64,
     thumbnail_key: String,
-    //entrypoint: String,
-    view_count: i64,
     created_at: String,
 }
 
@@ -121,6 +120,7 @@ pub async fn list_videos(
     page: u32,
     page_size: u32,
     public_base_url: &str,
+    view_counts: &HashMap<String, i64>,
 ) -> Result<Vec<VideoDto>> {
     let page = if page == 0 { 1 } else { page };
     let page_size = page_size.clamp(1, 100);
@@ -134,7 +134,7 @@ pub async fn list_videos(
     let rows: Vec<VideoRow> = match (name.as_ref(), tag) {
          (None, None) => {
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, view_count, created_at \
+                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
                   FROM videos \
                   ORDER BY datetime(created_at) DESC \
                   LIMIT ? OFFSET ?",
@@ -147,7 +147,7 @@ pub async fn list_videos(
          (Some(name), None) => {
              let pattern = format!("%{}%", name);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, view_count, created_at \
+                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
                   FROM videos \
                   WHERE LOWER(name) LIKE ? \
                   ORDER BY datetime(created_at) DESC \
@@ -162,7 +162,7 @@ pub async fn list_videos(
          (None, Some(tag)) => {
              let pattern = format!("%{}%", tag);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, view_count, created_at \
+                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
                   FROM videos \
                   WHERE tags LIKE ? \
                   ORDER BY datetime(created_at) DESC \
@@ -178,7 +178,7 @@ pub async fn list_videos(
              let name_pattern = format!("%{}%", name);
              let tag_pattern = format!("%{}%", tag);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, view_count, created_at \
+                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
                   FROM videos \
                   WHERE LOWER(name) LIKE ? AND tags LIKE ? \
                   ORDER BY datetime(created_at) DESC \
@@ -205,6 +205,8 @@ pub async fn list_videos(
         // Return player URL instead of direct HLS URL
         let player_url = format!("/player/{}", row.id);
 
+        let view_count = *view_counts.get(&row.id).unwrap_or(&0);
+
         result.push(VideoDto {
             id: row.id,
             name: row.name,
@@ -213,7 +215,7 @@ pub async fn list_videos(
             duration: row.duration as u32,
             thumbnail_url,
             player_url,
-            view_count: row.view_count,
+            view_count,
             created_at: row.created_at,
         });
     }
@@ -221,70 +223,38 @@ pub async fn list_videos(
     Ok(result)
 }
 
-pub async fn increment_view_count(
-    db_pool: &SqlitePool,
-    video_id: &str,
-    ip: &str,
-    user_agent: &str,
-) -> Result<()> {
-    let mut tx = db_pool.begin().await?;
-
-    // Increment view count in videos table
-    sqlx::query("UPDATE videos SET view_count = view_count + 1 WHERE id = ?")
-        .bind(video_id)
-        .execute(&mut *tx)
-        .await?;
-
-    // Record view in views table
-    sqlx::query("INSERT INTO views (video_id, ip_address, user_agent) VALUES (?, ?, ?)")
-        .bind(video_id)
-        .bind(ip)
-        .bind(user_agent)
-        .execute(&mut *tx)
-        .await?;
-
-    tx.commit().await?;
-
-    Ok(())
-}
-
-#[derive(sqlx::FromRow, serde::Serialize)]
-pub struct ViewHistoryItem {
-    pub date: String,
-    pub count: i64,
-}
-
-pub async fn get_analytics_history(db_pool: &SqlitePool) -> Result<Vec<ViewHistoryItem>> {
-    let rows = sqlx::query_as::<_, ViewHistoryItem>(
-        "SELECT date(created_at) as date, COUNT(*) as count \
-         FROM views \
-         GROUP BY date(created_at) \
-         ORDER BY date(created_at) DESC \
-         LIMIT 30",
-    )
-    .fetch_all(db_pool)
-    .await?;
-
-    Ok(rows)
-}
-
 #[derive(sqlx::FromRow, serde::Serialize)]
 pub struct VideoSummary {
     pub id: String,
     pub name: String,
+    #[sqlx(default)]
     pub view_count: i64,
     pub created_at: String,
     pub thumbnail_key: String,
 }
 
-pub async fn get_all_videos_summary(db_pool: &SqlitePool) -> Result<Vec<VideoSummary>> {
+pub async fn get_all_videos_summary(
+    db_pool: &SqlitePool,
+    view_counts: &HashMap<String, i64>,
+) -> Result<Vec<VideoSummary>> {
     let rows = sqlx::query_as::<_, VideoSummary>(
-        "SELECT id, name, view_count, created_at, thumbnail_key \
+        "SELECT id, name, created_at, thumbnail_key \
          FROM videos \
          ORDER BY datetime(created_at) DESC",
     )
     .fetch_all(db_pool)
     .await?;
+
+    // Update view counts from ClickHouse data
+    let rows = rows
+        .into_iter()
+        .map(|mut row| {
+            if let Some(&count) = view_counts.get(&row.id) {
+                row.view_count = count;
+            }
+            row
+        })
+        .collect();
 
     Ok(rows)
 }

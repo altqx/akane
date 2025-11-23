@@ -8,6 +8,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub r2: R2Config,
     pub video: VideoConfig,
+    pub clickhouse: ClickHouseConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -32,6 +33,14 @@ pub struct R2Config {
 #[derive(Clone, Debug, Deserialize)]
 pub struct VideoConfig {
     pub encoder: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ClickHouseConfig {
+    pub url: String,
+    pub user: String,
+    pub password: String,
+    pub database: String,
 }
 
 impl Config {

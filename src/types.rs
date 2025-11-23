@@ -1,5 +1,6 @@
 use crate::config::Config;
 use aws_sdk_s3::Client as S3Client;
+use clickhouse;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -35,6 +36,7 @@ pub struct AppState {
     pub progress: ProgressMap,
     pub active_viewers: Arc<RwLock<HashMap<String, HashMap<String, std::time::Instant>>>>,
     pub ffmpeg_semaphore: Arc<Semaphore>,
+    pub clickhouse: clickhouse::Client,
 }
 
 #[derive(Serialize, Clone, Debug)]

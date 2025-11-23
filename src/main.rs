@@ -1,3 +1,4 @@
+mod clickhouse;
 mod config;
 mod database;
 mod handlers;
@@ -76,6 +77,9 @@ async fn main() -> Result<()> {
     let database_url = "sqlite://videos.db";
     let db_pool = database::initialize_database(database_url).await?;
 
+    let clickhouse_client = clickhouse::initialize_client(&config.clickhouse);
+    clickhouse::create_schema(&clickhouse_client).await?;
+
     let progress = Arc::new(RwLock::new(HashMap::new()));
 
     let ffmpeg_semaphore = Arc::new(tokio::sync::Semaphore::new(
@@ -92,6 +96,7 @@ async fn main() -> Result<()> {
         progress: progress.clone(),
         active_viewers: Arc::new(RwLock::new(HashMap::new())),
         ffmpeg_semaphore,
+        clickhouse: clickhouse_client,
     };
 
     let public_routes = Router::new()

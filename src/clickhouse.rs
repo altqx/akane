@@ -1,0 +1,137 @@
+use crate::config::ClickHouseConfig;
+use anyhow::{Context, Result};
+use clickhouse::Client;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tracing::info;
+
+#[derive(Debug, Serialize, Deserialize, clickhouse::Row)]
+pub struct ViewRow {
+    pub video_id: String,
+    pub ip_address: String,
+    pub user_agent: String,
+    pub created_at: i64, // Unix timestamp
+}
+
+pub fn initialize_client(config: &ClickHouseConfig) -> Client {
+    Client::default()
+        .with_url(&config.url)
+        .with_user(&config.user)
+        .with_password(&config.password)
+        .with_database(&config.database)
+}
+
+pub async fn create_schema(client: &Client) -> Result<()> {
+    info!("Initializing ClickHouse schema...");
+
+    // Create views table
+    client
+        .query(
+            "CREATE TABLE IF NOT EXISTS views (
+                video_id String,
+                ip_address String,
+                user_agent String,
+                created_at DateTime
+            ) ENGINE = MergeTree()
+            ORDER BY (video_id, created_at)",
+        )
+        .execute()
+        .await
+        .context("Failed to create views table in ClickHouse")?;
+
+    info!("ClickHouse schema initialized successfully");
+    Ok(())
+}
+
+pub async fn insert_view(
+    client: &Client,
+    video_id: &str,
+    ip: &str,
+    user_agent: &str,
+) -> Result<()> {
+    let row = ViewRow {
+        video_id: video_id.to_string(),
+        ip_address: ip.to_string(),
+        user_agent: user_agent.to_string(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64,
+    };
+
+    let mut insert = client.insert("views")?;
+    insert.write(&row).await?;
+    insert
+        .end()
+        .await
+        .context("Failed to insert view into ClickHouse")?;
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize, clickhouse::Row)]
+pub struct ViewCount {
+    pub video_id: String,
+    pub count: u64,
+}
+
+pub async fn get_view_counts(
+    client: &Client,
+    video_ids: &[String],
+) -> Result<HashMap<String, i64>> {
+    if video_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // ClickHouse doesn't support passing array directly in WHERE IN easily with the typed client in this version sometimes,
+    // but let's try the standard parameter binding or formatting the query.
+    // For simplicity and safety with a small list, we can format the string (ids are UUIDs usually).
+    // A safer way is using a temporary table or just fetching all if the dataset is small, but let's filter.
+
+    // Let's just fetch counts for these IDs.
+    let ids_str = video_ids
+        .iter()
+        .map(|id| format!("'{}'", id))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let query = format!(
+        "SELECT video_id, count(*) as count FROM views WHERE video_id IN ({}) GROUP BY video_id",
+        ids_str
+    );
+
+    let mut cursor = client.query(&query).fetch::<ViewCount>()?;
+    let mut counts = HashMap::new();
+
+    while let Some(row) = cursor.next().await? {
+        counts.insert(row.video_id, row.count as i64);
+    }
+
+    Ok(counts)
+}
+
+#[derive(Debug, Deserialize, clickhouse::Row, Serialize)]
+pub struct HistoryItem {
+    pub date: String,
+    pub count: u64,
+}
+
+pub async fn get_analytics_history(client: &Client) -> Result<Vec<HistoryItem>> {
+    let query = "
+        SELECT 
+            formatDateTime(created_at, '%Y-%m-%d') as date, 
+            count(*) as count 
+        FROM views 
+        GROUP BY date 
+        ORDER BY date DESC 
+        LIMIT 30
+    ";
+
+    let mut cursor = client.query(query).fetch::<HistoryItem>()?;
+    let mut history = Vec::new();
+
+    while let Some(row) = cursor.next().await? {
+        history.push(row);
+    }
+
+    Ok(history)
+}

@@ -16,6 +16,12 @@ r2:
 video:
   encoder: "libx264"
 
+clickhouse:
+  url: "http://localhost:8123"
+  user: "default"
+  password: ""
+  database: "default"
+
 # Select encoder based on env var (default: libx264 CPU)
 # Supported values:
 #   CPU: "libx264" (default)

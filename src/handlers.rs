@@ -1,3 +1,4 @@
+use crate::clickhouse;
 use crate::database::{
     /*clear_database,*/ count_videos, list_videos as db_list_videos, save_video,
 };
@@ -418,9 +419,27 @@ pub async fn list_videos(
         page,
         page_size,
         &state.config.r2.public_base_url,
+        &HashMap::new(), // TODO: Fetch view counts if needed for list, or just pass empty for now as list usually doesn't show precise view counts or we can fetch them
     )
     .await
     .map_err(|e| internal_err(e))?;
+
+    // Optimization: Fetch view counts for the returned videos only
+    let video_ids: Vec<String> = items.iter().map(|v| v.id.clone()).collect();
+    let view_counts = clickhouse::get_view_counts(&state.clickhouse, &video_ids)
+        .await
+        .map_err(|e| internal_err(e))?;
+
+    // Update items with view counts
+    let items = items
+        .into_iter()
+        .map(|mut v| {
+            if let Some(&count) = view_counts.get(&v.id) {
+                v.view_count = count;
+            }
+            v
+        })
+        .collect();
 
     let total_u64 = total as u64;
     let page_u64 = page as u64;
@@ -502,8 +521,8 @@ pub async fn get_realtime_analytics(
 
 pub async fn get_analytics_history(
     State(state): State<AppState>,
-) -> Result<Json<Vec<crate::database::ViewHistoryItem>>, (StatusCode, String)> {
-    let history = crate::database::get_analytics_history(&state.db_pool)
+) -> Result<Json<Vec<crate::clickhouse::HistoryItem>>, (StatusCode, String)> {
+    let history = crate::clickhouse::get_analytics_history(&state.clickhouse)
         .await
         .map_err(|e| internal_err(e))?;
     Ok(Json(history))
@@ -521,9 +540,22 @@ pub struct AnalyticsVideoDto {
 pub async fn get_analytics_videos(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AnalyticsVideoDto>>, (StatusCode, String)> {
-    let videos = crate::database::get_all_videos_summary(&state.db_pool)
+    // First get all video IDs to fetch counts
+    // We fetch summary from DB and then enrich with CH data
+    let mut videos = crate::database::get_all_videos_summary(&state.db_pool, &HashMap::new())
         .await
         .map_err(|e| internal_err(e))?;
+
+    let video_ids: Vec<String> = videos.iter().map(|v| v.id.clone()).collect();
+    let view_counts = clickhouse::get_view_counts(&state.clickhouse, &video_ids)
+        .await
+        .map_err(|e| internal_err(e))?;
+
+    for video in &mut videos {
+        if let Some(&count) = view_counts.get(&video.id) {
+            video.view_count = count;
+        }
+    }
 
     let base = state.config.r2.public_base_url.trim_end_matches('/');
 
@@ -772,7 +804,7 @@ pub async fn get_player(
     // Increment view count on page load
     // Note: This is a simple implementation. In production, you'd want to debounce this
     // or use a more sophisticated method to prevent abuse.
-    let _ = crate::database::increment_view_count(&state.db_pool, &id, &ip, user_agent).await;
+    let _ = crate::clickhouse::insert_view(&state.clickhouse, &id, &ip, user_agent).await;
 
     // Generate token
     let token = generate_token(&id, &state.config.server.secret_key, &ip, user_agent);

@@ -1,6 +1,6 @@
 [package]
 name = "akane"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 
 [dependencies]
@@ -26,3 +26,4 @@ sha2 = "0.10.9"
 hex = "0.4.3"
 minify-js = "0.6.0"
 async-stream = "0.3"
+clickhouse = { version = "0.13.0", features = [] }
