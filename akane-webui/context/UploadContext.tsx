@@ -56,7 +56,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [results, setResults] = useState<UploadResult[]>([])
   const [error, setError] = useState<string | null>(null)
   const [uploadStatus, setUploadStatus] = useState<string>('')
-  
+
   // Refs for cleanup and cancellation
   const abortControllerRef = useRef<AbortController | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
@@ -66,9 +66,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     (uploadId: string, token: string | null): Promise<{ player_url: string; upload_id: string }> => {
       return new Promise((resolve, reject) => {
         // EventSource doesn't support custom headers, so pass token as query param
-        const url = token 
-          ? `/api/progress/${uploadId}?token=${encodeURIComponent(token)}`
-          : `/api/progress/${uploadId}`
+        const url = token ? `/api/progress/${uploadId}?token=${encodeURIComponent(token)}` : `/api/progress/${uploadId}`
         const eventSource = new EventSource(url)
         eventSourceRef.current = eventSource
 
@@ -143,7 +141,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
               // Do nothing - we already resolved or will resolve shortly
               return
             }
-            
+
             // Check if we have a completed status from the last message (backup check)
             if (latestProgress?.status === 'completed' && latestProgress?.result) {
               // This is expected - the stream closed after sending completion
@@ -163,11 +161,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
   // Helper function to upload file via XMLHttpRequest
   const uploadFile = useCallback(
-    (
-      file: File,
-      uploadId: string,
-      token: string | null
-    ): Promise<void> => {
+    (file: File, uploadId: string, token: string | null): Promise<void> => {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest()
         const formData = new FormData()
@@ -288,7 +282,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     setUploadStatus('')
     setProgress(null)
     setFiles([])
-    
+
     // Cleanup refs
     abortControllerRef.current = null
     eventSourceRef.current = null
