@@ -1,0 +1,23 @@
+server:
+  host: "0.0.0.0"
+  port: 3000
+  secret_key: "change_me"
+  admin_password: "change_me"
+  max_concurrent_encodes: 1
+  max_concurrent_uploads: 30
+
+r2:
+  endpoint: "https://<accountid>.r2.cloudflarestorage.com"
+  bucket: "your-bucket"
+  access_key_id: "your-access-key"
+  secret_access_key: "your-secret-key"
+  public_base_url: "https://your-domain.com/"
+
+video:
+  encoder: "libx264"
+
+# Select encoder based on env var (default: libx264 CPU)
+# Supported values:
+#   CPU: "libx264" (default)
+#   NVIDIA: "h264_nvenc"
+#   AMD: "h264_amf"

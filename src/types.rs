@@ -1,3 +1,4 @@
+use crate::config::Config;
 use aws_sdk_s3::Client as S3Client;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -28,13 +29,10 @@ pub struct VideoVariant {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub config: Config,
     pub s3: S3Client,
-    pub bucket: String,
-    pub public_base_url: String,
     pub db_pool: SqlitePool,
     pub progress: ProgressMap,
-    pub secret_key: String,
-    pub admin_password: String,
     pub active_viewers: Arc<RwLock<HashMap<String, HashMap<String, std::time::Instant>>>>,
     pub ffmpeg_semaphore: Arc<Semaphore>,
 }

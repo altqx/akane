@@ -3,8 +3,8 @@ use anyhow::{Context, Result};
 //use aws_sdk_s3::presigning::PresigningConfig;
 use futures::stream::{self, StreamExt};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 //use std::time::Duration;
 use tokio::fs;
 use tracing::info;
@@ -58,10 +58,7 @@ pub async fn upload_hls_to_r2(
     .await?;
 
     // Upload all files in parallel with concurrency limit
-    let max_concurrent_uploads = std::env::var("MAX_CONCURRENT_UPLOADS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(30);
+    let max_concurrent_uploads = state.config.server.max_concurrent_uploads;
 
     let total_files = files_to_upload.len() as u32;
     let uploaded_count = Arc::new(AtomicU32::new(0));
@@ -79,7 +76,7 @@ pub async fn upload_hls_to_r2(
                 state
                     .s3
                     .put_object()
-                    .bucket(&state.bucket)
+                    .bucket(&state.config.r2.bucket)
                     .key(&key)
                     .body(body_bytes.into())
                     .send()

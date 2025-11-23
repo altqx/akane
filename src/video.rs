@@ -94,6 +94,7 @@ pub async fn encode_to_hls(
     progress: &ProgressMap,
     upload_id: &str,
     semaphore: Arc<Semaphore>,
+    encoder: &str,
 ) -> Result<()> {
     fs::create_dir_all(out_dir).await?;
 
@@ -105,9 +106,9 @@ pub async fn encode_to_hls(
         anyhow::bail!("No suitable variants for video height {}", original_height);
     }
 
-    let video_codec = std::env::var("ENCODER").unwrap_or_else(|_| "libx264".to_string());
+    let video_codec = encoder.to_string();
     let gop = 48;
-    
+
     // Determine preset based on encoder
     let preset = if video_codec.contains("nvenc") {
         "p4" // p4 is medium preset for nvenc (p1=fastest, p7=slowest)
@@ -157,7 +158,10 @@ pub async fn encode_to_hls(
                 current_chunk,
                 total_chunks: total_variants,
                 percentage,
-                details: Some(format!("Encoding variant: {} ({}p)", variant.label, variant.height)),
+                details: Some(format!(
+                    "Encoding variant: {} ({}p)",
+                    variant.label, variant.height
+                )),
                 status: "processing".to_string(),
                 result: None,
                 error: None,
@@ -181,9 +185,11 @@ pub async fn encode_to_hls(
                 .arg(video_codec.as_ref());
 
             // Add profile and level only for software encoders
-            if !video_codec.contains("nvenc") && !video_codec.contains("_qsv") && !video_codec.contains("_amf") {
-                cmd.arg("-profile:v").arg("main")
-                   .arg("-level:v").arg("4.0");
+            if !video_codec.contains("nvenc")
+                && !video_codec.contains("_qsv")
+                && !video_codec.contains("_amf")
+            {
+                cmd.arg("-profile:v").arg("main").arg("-level:v").arg("4.0");
             }
 
             cmd.arg("-preset")
@@ -210,8 +216,7 @@ pub async fn encode_to_hls(
                 .arg("2");
 
             // Map all subtitle streams and convert to WebVTT
-            cmd.arg("-c:s")
-                .arg("webvtt");
+            cmd.arg("-c:s").arg("webvtt");
 
             cmd.arg("-hls_time")
                 .arg("4")
@@ -227,9 +232,7 @@ pub async fn encode_to_hls(
                 .arg(&segment_pattern)
                 .arg(&playlist_path);
 
-            let output = cmd.output()
-                .await
-                .context("failed to run ffmpeg")?;
+            let output = cmd.output().await.context("failed to run ffmpeg")?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -318,7 +321,7 @@ pub async fn encode_to_hls(
     // Check if any variant has subtitle files
     let mut has_subtitles = false;
     let variants_ref = get_variants_for_height(get_video_height(input.as_ref()).await?);
-    
+
     for variant in &variants_ref {
         let subtitle_playlist = out_dir.join(&variant.label).join("index_vtt.m3u8");
         if subtitle_playlist.exists() {
@@ -351,7 +354,7 @@ pub async fn encode_to_hls(
             .parse::<u32>()
             .unwrap_or(1000)
             * 1000;
-        
+
         let stream_inf = if has_subtitles {
             format!(
                 "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{},SUBTITLES=\"subs\"\n",
@@ -367,7 +370,7 @@ pub async fn encode_to_hls(
                 variant.height
             )
         };
-        
+
         master_content.push_str(&stream_inf);
         master_content.push_str(&format!("{}/index.m3u8\n", variant.label));
     }

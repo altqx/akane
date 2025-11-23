@@ -1,12 +1,12 @@
-use crate::database::{/*clear_database,*/ count_videos, list_videos as db_list_videos, save_video};
+use crate::database::{
+    /*clear_database,*/ count_videos, list_videos as db_list_videos, save_video,
+};
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
     AppState, ProgressResponse, ProgressUpdate, UploadAccepted, UploadResponse, VideoListResponse,
     VideoQuery,
 };
-use crate::video::{
-    encode_to_hls, get_variants_for_height, get_video_duration, get_video_height,
-};
+use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, get_video_height};
 // use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use axum::{
     Json,
@@ -226,6 +226,7 @@ pub async fn upload_video(
                 &state_clone.progress,
                 &upload_id_clone,
                 state_clone.ffmpeg_semaphore.clone(),
+                &state_clone.config.video.encoder,
             )
             .await?;
 
@@ -249,7 +250,8 @@ pub async fn upload_video(
             // Upload HLS to R2
             let prefix = format!("{}/", output_id);
             // Build public URL (pointing to our proxy)
-            let playlist_key = upload_hls_to_r2(&state_clone, &hls_dir, &prefix, Some(&upload_id_clone)).await?;
+            let playlist_key =
+                upload_hls_to_r2(&state_clone, &hls_dir, &prefix, Some(&upload_id_clone)).await?;
 
             // Save to database
             let thumbnail_key = format!("{}/thumbnail.jpg", output_id);
@@ -332,7 +334,7 @@ pub async fn get_progress(
 ) -> Sse<impl Stream<Item = Result<Event, anyhow::Error>> + Send> {
     // Check for token in query params (for EventSource which can't set headers)
     let is_authorized = if let Some(token) = params.get("token") {
-        let expected_auth = format!("Bearer {}", state.admin_password);
+        let expected_auth = format!("Bearer {}", state.config.server.admin_password);
         let provided_auth = format!("Bearer {}", token);
         provided_auth == expected_auth
     } else {
@@ -415,7 +417,7 @@ pub async fn list_videos(
         &filters,
         page,
         page_size,
-        &state.public_base_url,
+        &state.config.r2.public_base_url,
     )
     .await
     .map_err(|e| internal_err(e))?;
@@ -523,7 +525,7 @@ pub async fn get_analytics_videos(
         .await
         .map_err(|e| internal_err(e))?;
 
-    let base = state.public_base_url.trim_end_matches('/');
+    let base = state.config.r2.public_base_url.trim_end_matches('/');
 
     let dtos = videos
         .into_iter()
@@ -711,7 +713,7 @@ pub async fn get_hls_file(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        if !verify_token(&id, token, &state.secret_key, &ip, user_agent) {
+        if !verify_token(&id, token, &state.config.server.secret_key, &ip, user_agent) {
             return Err((
                 StatusCode::FORBIDDEN,
                 "Access denied: Invalid or expired token".to_string(),
@@ -723,7 +725,7 @@ pub async fn get_hls_file(
     let content = state
         .s3
         .get_object()
-        .bucket(&state.bucket)
+        .bucket(&state.config.r2.bucket)
         .key(&key)
         .send()
         .await
@@ -773,7 +775,7 @@ pub async fn get_player(
     let _ = crate::database::increment_view_count(&state.db_pool, &id, &ip, user_agent).await;
 
     // Generate token
-    let token = generate_token(&id, &state.secret_key, &ip, user_agent);
+    let token = generate_token(&id, &state.config.server.secret_key, &ip, user_agent);
 
     let js_code = format!(
         r#"

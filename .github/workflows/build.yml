@@ -1,0 +1,110 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v1
+      with:
+        bun-version: latest
+
+    - name: Install dependencies
+      working-directory: akane-webui
+      run: bun install
+
+    - name: Build
+      working-directory: akane-webui
+      run: bun run build
+
+    - name: Upload frontend artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: webui
+        path: akane-webui/dist/
+
+  build-backend:
+    needs: build-frontend
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: akane-linux-amd64
+            binary_name: akane
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: akane-windows-amd64
+            binary_name: akane.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download frontend artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: webui
+        path: webui
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+
+    - name: Build
+      run: cargo build --release --target ${{ matrix.target }}
+
+    - name: Prepare distribution
+      shell: bash
+      run: |
+        mkdir dist
+        cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/
+        cp -r webui dist/
+        # Copy migrations if they weren't embedded, but they are.
+        # Copy example config if exists
+        if [ -f config.yml.example ]; then
+          cp config.yml.example dist/config.yml
+        fi
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact_name }}
+        path: dist/
+
+    - name: Zip artifact
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      shell: bash
+      run: |
+        cd dist
+        if [ "${{ matrix.os }}" == "windows-latest" ]; then
+          7z a ../${{ matrix.artifact_name }}.zip *
+        else
+          zip -r ../${{ matrix.artifact_name }}.zip *
+        fi
+
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      with:
+        files: ${{ matrix.artifact_name }}.zip
+        tag_name: v${{ github.run_number }}
+        name: v${{ github.run_number }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
