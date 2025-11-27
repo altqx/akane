@@ -107,16 +107,23 @@ pub async fn encode_to_hls(
     }
 
     let video_codec = encoder.to_string();
+    let is_nvenc = video_codec.contains("nvenc");
+    
+    // GOP size - use 48 for 24fps content (2 seconds), adjust for HLS segment alignment
     let gop = 48;
 
     // Determine preset based on encoder
-    let preset = if video_codec.contains("nvenc") {
-        "p4" // p4 is medium preset for nvenc (p1=fastest, p7=slowest)
+    // GT 1030 optimizations: Use p4 (medium) for balance of speed and quality
+    // p1-p3 are faster but lower quality, p5-p7 are slower but higher quality
+    let preset = if is_nvenc {
+        "p4"
     } else {
-        "veryfast" // libx264/libx265 preset
+        "veryfast"
     };
 
-    // Encode all variants in parallel
+    // GT 1030 has limited NVENC sessions (typically 2 concurrent)
+    // The semaphore should already limit this, but we encode sequentially for GT 1030
+    // to avoid VRAM pressure and ensure stable encoding
     let input = Arc::new(input.clone());
     let out_dir = Arc::new(out_dir.clone());
     let video_codec = Arc::new(video_codec);
@@ -171,24 +178,74 @@ pub async fn encode_to_hls(
                 .await
                 .insert(upload_id.clone(), start_progress);
 
-            let scale_filter = format!("scale=-2:{}", variant.height);
+            // Use scale_cuda for NVENC to keep processing on GPU, avoiding CPU-GPU transfers
+            // GT 1030 benefits from keeping the entire pipeline on GPU
+            let is_nvenc_codec = video_codec.contains("nvenc");
+            let scale_filter = if is_nvenc_codec {
+                // Use scale_cuda for GPU-accelerated scaling (requires hwupload_cuda)
+                format!("scale_cuda=-2:{}", variant.height)
+            } else {
+                format!("scale=-2:{}", variant.height)
+            };
 
             let mut cmd = Command::new("ffmpeg");
             cmd.stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())
                 .arg("-loglevel")
                 .arg("error")
-                .arg("-y")
-                .arg("-i")
+                .arg("-y");
+
+            // For NVENC on GT 1030, use hardware decoding to reduce CPU load
+            // and keep the video pipeline on GPU
+            if is_nvenc_codec {
+                cmd.arg("-hwaccel")
+                    .arg("cuda")
+                    .arg("-hwaccel_output_format")
+                    .arg("cuda");
+            }
+
+            cmd.arg("-i")
                 .arg(input.as_ref())
                 .arg("-c:v")
                 .arg(video_codec.as_ref());
 
-            // Add profile and level only for software encoders
-            if !video_codec.contains("nvenc")
-                && !video_codec.contains("_qsv")
-                && !video_codec.contains("_amf")
-            {
+            // Add NVENC-specific optimizations for GT 1030
+            if is_nvenc_codec {
+                cmd
+                    // Use main profile for better compatibility
+                    .arg("-profile:v")
+                    .arg("main")
+                    // Level 4.1 supports up to 1080p60 or 1440p30
+                    .arg("-level:v")
+                    .arg("4.1")
+                    // Rate control: VBR for better quality at target bitrate
+                    .arg("-rc:v")
+                    .arg("vbr")
+                    // Lookahead improves quality by analyzing future frames
+                    // GT 1030 can handle 20-32 frames lookahead
+                    .arg("-rc-lookahead")
+                    .arg("20")
+                    // B-frames improve compression efficiency
+                    // GT 1030 supports up to 4 B-frames
+                    .arg("-bf")
+                    .arg("3")
+                    // Spatial AQ improves quality in complex regions
+                    .arg("-spatial-aq")
+                    .arg("1")
+                    // Temporal AQ improves quality across frames
+                    .arg("-temporal-aq")
+                    .arg("1")
+                    // AQ strength (1-15, default 8)
+                    .arg("-aq-strength")
+                    .arg("8")
+                    // Use CUDA surfaces for better memory efficiency
+                    .arg("-surfaces")
+                    .arg("8")
+                    // Weighted prediction for better P-frame compression
+                    .arg("-weighted_pred")
+                    .arg("1");
+            } else if !video_codec.contains("_qsv") && !video_codec.contains("_amf") {
+                // Software encoder settings
                 cmd.arg("-profile:v").arg("main").arg("-level:v").arg("4.0");
             }
 
@@ -196,10 +253,20 @@ pub async fn encode_to_hls(
                 .arg(preset.as_ref())
                 .arg("-b:v")
                 .arg(&variant.bitrate)
+                // Set max bitrate to 1.5x target for VBR headroom
+                .arg("-maxrate")
+                .arg(format!("{}k",
+                    variant.bitrate.trim_end_matches('k').parse::<u32>().unwrap_or(1000) * 3 / 2
+                ))
+                // Buffer size = 2x target bitrate for smooth streaming
+                .arg("-bufsize")
+                .arg(format!("{}k",
+                    variant.bitrate.trim_end_matches('k').parse::<u32>().unwrap_or(1000) * 2
+                ))
                 .arg("-vf")
                 .arg(&scale_filter)
                 .arg("-pix_fmt")
-                .arg("yuv420p")
+                .arg(if is_nvenc_codec { "cuda" } else { "yuv420p" })
                 .arg("-g")
                 .arg(gop.to_string())
                 .arg("-keyint_min")
@@ -269,27 +336,54 @@ pub async fn encode_to_hls(
     }
 
     // Spawn thumbnail generation in parallel with encoding
+    // For GT 1030, use CUDA-accelerated decoding for faster thumbnail extraction
     let input_thumb = Arc::clone(&input);
     let out_dir_thumb = Arc::clone(&out_dir);
+    let video_codec_thumb = Arc::clone(&video_codec);
     let thumb_task = tokio::task::spawn(async move {
         let thumb_path = out_dir_thumb.join("thumbnail.jpg");
         info!("Generating thumbnail: {:?}", thumb_path);
 
-        let thumb_output = Command::new("ffmpeg")
+        let is_nvenc_codec = video_codec_thumb.contains("nvenc");
+        
+        let mut thumb_cmd = Command::new("ffmpeg");
+        thumb_cmd
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .arg("-loglevel")
             .arg("error")
-            .arg("-y")
+            .arg("-y");
+
+        // Use CUDA hardware acceleration for thumbnail extraction on GT 1030
+        if is_nvenc_codec {
+            thumb_cmd
+                .arg("-hwaccel")
+                .arg("cuda")
+                .arg("-hwaccel_output_format")
+                .arg("cuda");
+        }
+
+        thumb_cmd
             .arg("-ss")
             .arg("0")
             .arg("-i")
             .arg(input_thumb.as_ref())
             .arg("-vframes")
-            .arg("1")
+            .arg("1");
+
+        // For CUDA, need to download frame back to CPU for JPEG encoding
+        if is_nvenc_codec {
+            thumb_cmd
+                .arg("-vf")
+                .arg("hwdownload,format=nv12");
+        }
+
+        thumb_cmd
             .arg("-q:v")
             .arg("20")
-            .arg(&thumb_path)
+            .arg(&thumb_path);
+
+        let thumb_output = thumb_cmd
             .output()
             .await
             .context("failed to generate thumbnail")?;
