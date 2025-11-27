@@ -22,8 +22,8 @@ clickhouse:
   password: ""
   database: "default"
 
-# Select encoder based on env var (default: libx264 CPU)
-# Supported values:
-#   CPU: "libx264" (default)
-#   NVIDIA: "h264_nvenc"
-#   AMD: "h264_amf"
+# Supported encoders:
+# - h264_nvenc (NVIDIA GPU)
+# - h264_vaapi (AMD/Intel GPU on Linux)
+# - h264_qsv   (Intel QuickSync)
+# - libx264    (CPU)
