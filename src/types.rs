@@ -38,6 +38,7 @@ pub struct AppState {
     pub active_viewers: Arc<RwLock<HashMap<String, HashMap<String, std::time::Instant>>>>,
     pub ffmpeg_semaphore: Arc<Semaphore>,
     pub clickhouse: clickhouse::Client,
+    pub chunked_uploads: ChunkedUploadsMap,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -113,4 +114,27 @@ pub struct QueueListResponse {
     pub active_count: u32,
     pub completed_count: u32,
     pub failed_count: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChunkedUpload {
+    pub file_name: String,
+    pub total_chunks: u32,
+    pub received_chunks: Vec<bool>,
+    pub temp_dir: std::path::PathBuf,
+}
+
+pub type ChunkedUploadsMap = Arc<RwLock<HashMap<String, ChunkedUpload>>>;
+
+#[derive(Serialize)]
+pub struct ChunkUploadResponse {
+    pub upload_id: String,
+    pub chunk_index: u32,
+    pub received: bool,
+}
+
+#[derive(Deserialize)]
+pub struct FinalizeUploadRequest {
+    pub name: String,
+    pub tags: Option<String>,
 }

@@ -98,6 +98,7 @@ async fn main() -> Result<()> {
         active_viewers: Arc::new(RwLock::new(HashMap::new())),
         ffmpeg_semaphore,
         clickhouse: clickhouse_client,
+        chunked_uploads: Arc::new(RwLock::new(HashMap::new())),
     };
 
     let public_routes = Router::new()
@@ -109,6 +110,8 @@ async fn main() -> Result<()> {
 
     let protected_routes = Router::new()
         .route("/upload", post(handlers::upload_video))
+        .route("/upload/chunk", post(handlers::upload_chunk))
+        .route("/upload/finalize", post(handlers::finalize_chunked_upload))
         .route("/videos", get(handlers::list_videos))
         .route("/queues", get(handlers::list_queues))
         .route("/auth/check", get(check_auth))

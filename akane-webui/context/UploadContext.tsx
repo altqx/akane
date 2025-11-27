@@ -47,6 +47,7 @@ const UploadContext = createContext<UploadContextType | undefined>(undefined)
 // Constants for better maintainability
 const PROGRESS_TIMEOUT_MS = 60000 // 60 seconds
 const SSE_CLOSE_GRACE_PERIOD_MS = 100 // 100ms grace period to process completion message
+const CHUNK_SIZE = 50 * 1024 * 1024 // 50MB chunks (under Cloudflare's 100MB limit)
 
 // Fallback UUID generator for browsers that don't support crypto.randomUUID
 function generateUUID(): string {
@@ -198,7 +199,127 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     []
   )
 
-  // Helper function to upload file via XMLHttpRequest
+  // Helper function to upload a single chunk
+  const uploadChunk = useCallback(
+    async (
+      chunk: Blob,
+      uploadId: string,
+      chunkIndex: number,
+      totalChunks: number,
+      fileName: string,
+      token: string | null
+    ): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        const formData = new FormData()
+
+        formData.append('chunk', chunk)
+        formData.append('chunk_index', chunkIndex.toString())
+        formData.append('total_chunks', totalChunks.toString())
+        formData.append('file_name', fileName)
+
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve()
+          } else {
+            let errorMsg = 'Chunk upload failed'
+            try {
+              const response = JSON.parse(xhr.responseText)
+              errorMsg = response.error || response.message || errorMsg
+            } catch {
+              errorMsg = xhr.responseText || errorMsg
+            }
+            reject(new Error(errorMsg))
+          }
+        })
+
+        xhr.addEventListener('error', () => reject(new Error('Network error during chunk upload')))
+        xhr.addEventListener('abort', () => reject(new Error('Chunk upload aborted')))
+
+        const apiBase = getApiBaseUrl()
+        xhr.open('POST', `${apiBase}/api/upload/chunk`)
+        xhr.setRequestHeader('X-Upload-ID', uploadId)
+        if (token) {
+          xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+        }
+        xhr.send(formData)
+
+        // Store xhr for potential cancellation
+        abortControllerRef.current = {
+          abort: () => xhr.abort()
+        } as AbortController
+      })
+    },
+    []
+  )
+
+  // Helper function to finalize chunked upload
+  const finalizeUpload = useCallback(
+    async (uploadId: string, fileName: string, fileTags: string, token: string | null): Promise<void> => {
+      const apiBase = getApiBaseUrl()
+      const response = await fetch(`${apiBase}/api/upload/finalize`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Upload-ID': uploadId,
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({
+          name: fileName.replace(/\.[^/.]+$/, ''),
+          tags: fileTags.trim() || undefined
+        })
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.error || errorData.message || 'Failed to finalize upload')
+      }
+    },
+    []
+  )
+
+  // Helper function to upload file via chunked upload (for Cloudflare Tunnels compatibility)
+  const uploadFileChunked = useCallback(
+    async (file: File, uploadId: string, token: string | null): Promise<void> => {
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+      console.log(`[Upload] Chunked upload: ${totalChunks} chunks of ${CHUNK_SIZE / 1024 / 1024}MB each`)
+
+      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        const start = chunkIndex * CHUNK_SIZE
+        const end = Math.min(start + CHUNK_SIZE, file.size)
+        const chunk = file.slice(start, end)
+
+        setProgress({
+          stage: 'Uploading to server',
+          percentage: Math.round((chunkIndex / totalChunks) * 100),
+          current_chunk: chunkIndex + 1,
+          total_chunks: totalChunks,
+          details: `Uploading chunk ${chunkIndex + 1} of ${totalChunks} (${(start / 1024 / 1024).toFixed(1)}MB - ${(end / 1024 / 1024).toFixed(1)}MB)`,
+          status: 'uploading'
+        })
+
+        console.log(`[Upload] Uploading chunk ${chunkIndex + 1}/${totalChunks}`)
+        await uploadChunk(chunk, uploadId, chunkIndex, totalChunks, file.name, token)
+      }
+
+      // Finalize the upload
+      setProgress({
+        stage: 'Finalizing upload',
+        percentage: 100,
+        current_chunk: totalChunks,
+        total_chunks: totalChunks,
+        details: 'Assembling file on server...',
+        status: 'uploading'
+      })
+
+      console.log('[Upload] All chunks uploaded, finalizing...')
+      await finalizeUpload(uploadId, file.name, tags, token)
+      console.log('[Upload] Upload finalized')
+    },
+    [tags, uploadChunk, finalizeUpload]
+  )
+
+  // Helper function to upload file via XMLHttpRequest (single request for small files)
   const uploadFile = useCallback(
     (file: File, uploadId: string, token: string | null): Promise<void> => {
       return new Promise((resolve, reject) => {
@@ -211,8 +332,14 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           formData.append('tags', tags.trim())
         }
 
+        // Track upload start
+        xhr.upload.addEventListener('loadstart', () => {
+          console.log('[Upload] XHR upload started')
+        })
+
         // Track upload progress
         xhr.upload.addEventListener('progress', (event) => {
+          console.log('[Upload] Progress event:', event.loaded, '/', event.total, 'lengthComputable:', event.lengthComputable)
           if (event.lengthComputable) {
             const percentComplete = Math.round((event.loaded / event.total) * 100)
             setProgress((prev) => {
@@ -233,6 +360,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         })
 
         xhr.addEventListener('load', () => {
+          console.log('[Upload] XHR load complete, status:', xhr.status)
           if (xhr.status >= 200 && xhr.status < 300) {
             resolve()
           } else {
@@ -247,7 +375,10 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           }
         })
 
-        xhr.addEventListener('error', () => reject(new Error('Network error during upload')))
+        xhr.addEventListener('error', (e) => {
+          console.error('[Upload] XHR error event:', e)
+          reject(new Error('Network error during upload'))
+        })
         xhr.addEventListener('abort', () => reject(new Error('Upload aborted')))
 
         const apiBase = getApiBaseUrl()
@@ -299,7 +430,14 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         // The upload will initialize progress on the server, and the progress listener
         // will wait up to 60 seconds for the progress to appear
         console.log('[Upload] Starting file upload...')
-        const uploadPromise = uploadFile(file, uploadId, token)
+        
+        // Use chunked upload for files > 50MB (Cloudflare Tunnel limit is 100MB)
+        const useChunkedUpload = file.size > CHUNK_SIZE
+        console.log(`[Upload] File size: ${(file.size / 1024 / 1024).toFixed(2)}MB, using ${useChunkedUpload ? 'chunked' : 'single'} upload`)
+        
+        const uploadPromise = useChunkedUpload 
+          ? uploadFileChunked(file, uploadId, token)
+          : uploadFile(file, uploadId, token)
         
         // Small delay to ensure the upload request reaches the server first
         // This gives the server time to initialize the progress entry
@@ -347,7 +485,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     // Cleanup refs
     abortControllerRef.current = null
     eventSourceRef.current = null
-  }, [files, createProgressListener, uploadFile])
+  }, [files, createProgressListener, uploadFile, uploadFileChunked])
 
   const cancelUpload = useCallback(() => {
     // Cancel ongoing XHR request

@@ -4,8 +4,9 @@ use crate::database::{
 };
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
-    AppState, ProgressResponse, ProgressUpdate, UploadAccepted, UploadResponse, VideoListResponse,
-    VideoQuery, QueueItem, QueueListResponse,
+    AppState, ChunkUploadResponse, ChunkedUpload, FinalizeUploadRequest, ProgressResponse,
+    ProgressUpdate, UploadAccepted, UploadResponse, VideoListResponse, VideoQuery, QueueItem,
+    QueueListResponse,
 };
 use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, get_video_height};
 // use aws_sdk_s3::types::{Delete, ObjectIdentifier};
@@ -24,8 +25,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::{fs, io::AsyncWriteExt};
-use tracing::error;
+use tokio::{fs, io::AsyncWriteExt, io::AsyncReadExt};
+use tracing::{error, info};
 use uuid::Uuid;
 
 pub async fn upload_video(
@@ -332,6 +333,433 @@ pub async fn upload_video(
     Ok(Json(UploadAccepted {
         upload_id,
         message: "File uploaded successfully, processing started in background".to_string(),
+    }))
+}
+
+/// Handle chunked upload - receives individual chunks of a large file
+pub async fn upload_chunk(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Json<ChunkUploadResponse>, (StatusCode, String)> {
+    let upload_id = headers
+        .get("X-Upload-ID")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing X-Upload-ID header".to_string()))?;
+
+    let mut chunk_data: Option<Vec<u8>> = None;
+    let mut chunk_index: Option<u32> = None;
+    let mut total_chunks: Option<u32> = None;
+    let mut file_name: Option<String> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?
+    {
+        let field_name = field.name().map(|s| s.to_string());
+
+        match field_name.as_deref() {
+            Some("chunk") => {
+                chunk_data = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|e| internal_err(anyhow::anyhow!(e)))?
+                        .to_vec(),
+                );
+            }
+            Some("chunk_index") => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+                chunk_index = Some(
+                    text.parse()
+                        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid chunk_index".to_string()))?,
+                );
+            }
+            Some("total_chunks") => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+                total_chunks = Some(
+                    text.parse()
+                        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid total_chunks".to_string()))?,
+                );
+            }
+            Some("file_name") => {
+                file_name = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| internal_err(anyhow::anyhow!(e)))?,
+                );
+            }
+            _ => continue,
+        }
+    }
+
+    let chunk_data =
+        chunk_data.ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing chunk data".to_string()))?;
+    let chunk_index =
+        chunk_index.ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing chunk_index".to_string()))?;
+    let total_chunks =
+        total_chunks.ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing total_chunks".to_string()))?;
+    let file_name =
+        file_name.ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing file_name".to_string()))?;
+
+    info!(
+        "Received chunk {}/{} for upload {} (file: {})",
+        chunk_index + 1,
+        total_chunks,
+        upload_id,
+        file_name
+    );
+
+    // Initialize or get chunked upload entry
+    let temp_dir = {
+        let mut uploads = state.chunked_uploads.write().await;
+
+        if !uploads.contains_key(&upload_id) {
+            let temp_dir = std::env::temp_dir().join(format!("chunked-{}", upload_id));
+            fs::create_dir_all(&temp_dir)
+                .await
+                .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+            uploads.insert(
+                upload_id.clone(),
+                ChunkedUpload {
+                    file_name: file_name.clone(),
+                    total_chunks,
+                    received_chunks: vec![false; total_chunks as usize],
+                    temp_dir: temp_dir.clone(),
+                },
+            );
+
+            // Initialize progress
+            let progress = ProgressUpdate {
+                stage: "Receiving chunks".to_string(),
+                current_chunk: 0,
+                total_chunks,
+                percentage: 0,
+                details: Some(format!("Receiving chunk 1 of {}", total_chunks)),
+                status: "processing".to_string(),
+                result: None,
+                error: None,
+                video_name: Some(file_name.replace(&['.'][..], "_")),
+            };
+            state
+                .progress
+                .write()
+                .await
+                .insert(upload_id.clone(), progress);
+        }
+
+        uploads.get(&upload_id).unwrap().temp_dir.clone()
+    };
+
+    // Write chunk to temp file
+    let chunk_path = temp_dir.join(format!("chunk_{:06}", chunk_index));
+    fs::write(&chunk_path, &chunk_data)
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+    // Mark chunk as received
+    {
+        let mut uploads = state.chunked_uploads.write().await;
+        if let Some(upload) = uploads.get_mut(&upload_id) {
+            upload.received_chunks[chunk_index as usize] = true;
+        }
+    }
+
+    // Update progress
+    let received_count = {
+        let uploads = state.chunked_uploads.read().await;
+        uploads
+            .get(&upload_id)
+            .map(|u| u.received_chunks.iter().filter(|&&r| r).count() as u32)
+            .unwrap_or(0)
+    };
+
+    let progress = ProgressUpdate {
+        stage: "Receiving chunks".to_string(),
+        current_chunk: received_count,
+        total_chunks,
+        percentage: (received_count * 100) / total_chunks,
+        details: Some(format!("Received chunk {} of {}", received_count, total_chunks)),
+        status: "processing".to_string(),
+        result: None,
+        error: None,
+        video_name: Some(file_name.replace(&['.'][..], "_")),
+    };
+    state
+        .progress
+        .write()
+        .await
+        .insert(upload_id.clone(), progress);
+
+    Ok(Json(ChunkUploadResponse {
+        upload_id,
+        chunk_index,
+        received: true,
+    }))
+}
+
+/// Finalize chunked upload - assembles chunks and starts processing
+pub async fn finalize_chunked_upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FinalizeUploadRequest>,
+) -> Result<Json<UploadAccepted>, (StatusCode, String)> {
+    let upload_id = headers
+        .get("X-Upload-ID")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing X-Upload-ID header".to_string()))?;
+
+    info!("Finalizing chunked upload: {}", upload_id);
+
+    // Get and remove chunked upload entry
+    let chunked_upload = {
+        let mut uploads = state.chunked_uploads.write().await;
+        uploads.remove(&upload_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "Upload ID not found or already finalized".to_string(),
+            )
+        })?
+    };
+
+    // Verify all chunks received
+    if !chunked_upload.received_chunks.iter().all(|&r| r) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Not all chunks have been received".to_string(),
+        ));
+    }
+
+    // Update progress
+    let progress = ProgressUpdate {
+        stage: "Assembling file".to_string(),
+        current_chunk: chunked_upload.total_chunks,
+        total_chunks: chunked_upload.total_chunks,
+        percentage: 100,
+        details: Some("Assembling chunks into final file...".to_string()),
+        status: "processing".to_string(),
+        result: None,
+        error: None,
+        video_name: Some(body.name.clone()),
+    };
+    state
+        .progress
+        .write()
+        .await
+        .insert(upload_id.clone(), progress);
+
+    // Assemble chunks into final file
+    let final_path = std::env::temp_dir().join(format!("{}-{}", Uuid::new_v4(), chunked_upload.file_name));
+    let mut final_file = fs::File::create(&final_path)
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+    for i in 0..chunked_upload.total_chunks {
+        let chunk_path = chunked_upload.temp_dir.join(format!("chunk_{:06}", i));
+        let mut chunk_file = fs::File::open(&chunk_path)
+            .await
+            .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+        
+        let mut buffer = Vec::new();
+        chunk_file
+            .read_to_end(&mut buffer)
+            .await
+            .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+        
+        final_file
+            .write_all(&buffer)
+            .await
+            .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+    }
+
+    // Cleanup chunk temp directory
+    let _ = fs::remove_dir_all(&chunked_upload.temp_dir).await;
+
+    // Parse tags
+    let tags: Vec<String> = body
+        .tags
+        .map(|t| {
+            t.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let video_name = body.name;
+
+    // Update progress to start processing
+    let progress = ProgressUpdate {
+        stage: "Queued for processing".to_string(),
+        current_chunk: 0,
+        total_chunks: 1,
+        percentage: 0,
+        details: None,
+        status: "processing".to_string(),
+        result: None,
+        error: None,
+        video_name: Some(video_name.clone()),
+    };
+    state
+        .progress
+        .write()
+        .await
+        .insert(upload_id.clone(), progress);
+
+    // Spawn background task for processing (same as regular upload)
+    let state_clone = state.clone();
+    let upload_id_clone = upload_id.clone();
+    let video_path_clone = final_path.clone();
+    let video_name_clone = video_name.clone();
+    let tags_clone = tags.clone();
+
+    tokio::spawn(async move {
+        let result = async {
+            let output_id = Uuid::new_v4().to_string();
+            let hls_dir = std::env::temp_dir().join(format!("hls-{}", &output_id));
+            fs::create_dir_all(&hls_dir)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+
+            let (video_duration, original_height) = tokio::join!(
+                get_video_duration(&video_path_clone),
+                get_video_height(&video_path_clone)
+            );
+            let video_duration = video_duration?;
+            let original_height = original_height?;
+            let variants = get_variants_for_height(original_height);
+            let available_resolutions: Vec<String> =
+                variants.iter().map(|v| v.label.clone()).collect();
+
+            let encoding_progress = ProgressUpdate {
+                stage: "FFmpeg processing".to_string(),
+                current_chunk: 0,
+                total_chunks: variants.len() as u32,
+                percentage: 0,
+                details: Some("Starting encoding...".to_string()),
+                status: "processing".to_string(),
+                result: None,
+                error: None,
+                video_name: Some(video_name_clone.clone()),
+            };
+            state_clone
+                .progress
+                .write()
+                .await
+                .insert(upload_id_clone.clone(), encoding_progress);
+
+            encode_to_hls(
+                &video_path_clone,
+                &hls_dir,
+                &state_clone.progress,
+                &upload_id_clone,
+                state_clone.ffmpeg_semaphore.clone(),
+                &state_clone.config.video.encoder,
+            )
+            .await?;
+
+            let upload_progress = ProgressUpdate {
+                stage: "Upload to R2".to_string(),
+                current_chunk: 0,
+                total_chunks: 1,
+                percentage: 0,
+                details: Some("Uploading segments to storage...".to_string()),
+                status: "processing".to_string(),
+                result: None,
+                error: None,
+                video_name: Some(video_name_clone.clone()),
+            };
+            state_clone
+                .progress
+                .write()
+                .await
+                .insert(upload_id_clone.clone(), upload_progress);
+
+            let prefix = format!("{}/", output_id);
+            let playlist_key =
+                upload_hls_to_r2(&state_clone, &hls_dir, &prefix, Some(&upload_id_clone)).await?;
+
+            let thumbnail_key = format!("{}/thumbnail.jpg", output_id);
+            let entrypoint = playlist_key.clone();
+
+            save_video(
+                &state_clone.db_pool,
+                &output_id,
+                &video_name_clone,
+                &tags_clone,
+                &available_resolutions,
+                video_duration,
+                &thumbnail_key,
+                &entrypoint,
+            )
+            .await?;
+
+            let _ = fs::remove_file(&video_path_clone).await;
+            let _ = fs::remove_dir_all(&hls_dir).await;
+
+            let player_url = format!("/player/{}", output_id);
+            Ok::<_, anyhow::Error>(UploadResponse {
+                player_url,
+                upload_id: upload_id_clone.clone(),
+            })
+        }
+        .await;
+
+        match result {
+            Ok(response) => {
+                let completion_progress = ProgressUpdate {
+                    stage: "Completed".to_string(),
+                    current_chunk: 1,
+                    total_chunks: 1,
+                    percentage: 100,
+                    details: Some("Upload and processing complete".to_string()),
+                    status: "completed".to_string(),
+                    result: Some(response),
+                    error: None,
+                    video_name: Some(video_name_clone.clone()),
+                };
+                state_clone
+                    .progress
+                    .write()
+                    .await
+                    .insert(upload_id_clone, completion_progress);
+            }
+            Err(e) => {
+                error!("Background processing failed: {:?}", e);
+                let error_progress = ProgressUpdate {
+                    stage: "Failed".to_string(),
+                    current_chunk: 0,
+                    total_chunks: 1,
+                    percentage: 0,
+                    details: Some(format!("Processing failed: {}", e)),
+                    status: "failed".to_string(),
+                    result: None,
+                    error: Some(e.to_string()),
+                    video_name: Some(video_name_clone.clone()),
+                };
+                state_clone
+                    .progress
+                    .write()
+                    .await
+                    .insert(upload_id_clone, error_progress);
+            }
+        }
+    });
+
+    Ok(Json(UploadAccepted {
+        upload_id,
+        message: "Chunked upload finalized, processing started in background".to_string(),
     }))
 }
 
