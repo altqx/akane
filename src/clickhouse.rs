@@ -28,13 +28,16 @@ pub async fn create_schema(client: &Client, config: &ClickHouseConfig) -> Result
         .with_url(&config.url)
         .with_user(&config.user)
         .with_password(&config.password);
-    
+
     temp_client
-        .query(&format!("CREATE DATABASE IF NOT EXISTS `{}`", config.database))
+        .query(&format!(
+            "CREATE DATABASE IF NOT EXISTS `{}`",
+            config.database
+        ))
         .execute()
         .await
         .context("Failed to create database in ClickHouse")?;
-    
+
     info!("ClickHouse database `{}` ready", config.database);
 
     // Create views table
@@ -71,7 +74,7 @@ pub async fn insert_view(
             .as_secs() as u32,
     };
 
-    let mut insert = client.insert("views")?;
+    let mut insert = client.insert::<ViewRow>("views").await?;
     insert.write(&row).await?;
     insert
         .end()
@@ -96,7 +99,10 @@ pub async fn get_view_counts(
     }
 
     // Build the IN clause with placeholders for each video_id
-    let placeholders: Vec<String> = video_ids.iter().map(|id| format!("'{}'", id.replace('\''  , "''"))).collect();
+    let placeholders: Vec<String> = video_ids
+        .iter()
+        .map(|id| format!("'{}'", id.replace('\'', "''")))
+        .collect();
     let query = format!(
         "SELECT video_id, count(*) as count FROM views WHERE video_id IN ({}) GROUP BY video_id",
         placeholders.join(", ")
