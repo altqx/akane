@@ -12,7 +12,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::{
     Router,
     extract::{Request, State},
-    http::{StatusCode, header, Method},
+    http::{Method, StatusCode, header},
     middleware::{self, Next},
     response::Redirect,
     response::Response,

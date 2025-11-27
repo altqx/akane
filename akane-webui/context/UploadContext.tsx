@@ -107,7 +107,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     setUploadItems((prev) => prev.filter((item) => item.id !== id))
   }, [])
 
-  // Upload a single chunk
+  // Upload a single chunk with progress tracking
   const uploadChunk = useCallback(
     async (
       chunk: Blob,
@@ -116,29 +116,53 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       totalChunks: number,
       fileName: string,
       token: string | null,
+      onChunkProgress: (bytesUploaded: number) => void,
       signal?: AbortSignal
     ): Promise<void> => {
-      const formData = new FormData()
-      formData.append('chunk', chunk)
-      formData.append('chunk_index', chunkIndex.toString())
-      formData.append('total_chunks', totalChunks.toString())
-      formData.append('file_name', fileName)
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        const formData = new FormData()
+        formData.append('chunk', chunk)
+        formData.append('chunk_index', chunkIndex.toString())
+        formData.append('total_chunks', totalChunks.toString())
+        formData.append('file_name', fileName)
 
-      const apiBase = getApiBaseUrl()
-      const response = await fetch(`${apiBase}/api/upload/chunk`, {
-        method: 'POST',
-        headers: {
-          'X-Upload-ID': uploadId,
-          ...(token ? { Authorization: `Bearer ${token}` } : {})
-        },
-        body: formData,
-        signal
+        xhr.upload.addEventListener('progress', (event) => {
+          if (event.lengthComputable) {
+            onChunkProgress(event.loaded)
+          }
+        })
+
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve()
+          } else {
+            let errorMsg = 'Chunk upload failed'
+            try {
+              const response = JSON.parse(xhr.responseText)
+              errorMsg = response.error || response.message || errorMsg
+            } catch {
+              errorMsg = xhr.responseText || errorMsg
+            }
+            reject(new Error(errorMsg))
+          }
+        })
+
+        xhr.addEventListener('error', () => reject(new Error('Network error during chunk upload')))
+        xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
+
+        if (signal) {
+          signal.addEventListener('abort', () => xhr.abort())
+        }
+
+        const apiBase = getApiBaseUrl()
+        xhr.open('POST', `${apiBase}/api/upload/chunk`)
+        xhr.setRequestHeader('X-Upload-ID', uploadId)
+        if (token) {
+          xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+        }
+        xhr.send(formData)
       })
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || errorData.message || 'Chunk upload failed')
-      }
     },
     []
   )
@@ -187,7 +211,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       signal?: AbortSignal
     ): Promise<void> => {
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
-      let totalBytesUploaded = 0
+      let completedChunksBytes = 0
 
       for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
         if (signal?.aborted) throw new Error('Upload cancelled')
@@ -196,9 +220,15 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         const end = Math.min(start + CHUNK_SIZE, file.size)
         const chunk = file.slice(start, end)
 
-        await uploadChunk(chunk, uploadId, chunkIndex, totalChunks, file.name, token, signal)
-        totalBytesUploaded = end
-        onProgress(Math.round(((chunkIndex + 1) / totalChunks) * 90), totalBytesUploaded) // 0-90% for chunks
+        // Track progress within each chunk
+        const onChunkProgress = (chunkBytesUploaded: number) => {
+          const totalBytesUploaded = completedChunksBytes + chunkBytesUploaded
+          const progressPercent = Math.round((totalBytesUploaded / file.size) * 90) // 0-90% for chunks
+          onProgress(progressPercent, totalBytesUploaded)
+        }
+
+        await uploadChunk(chunk, uploadId, chunkIndex, totalChunks, file.name, token, onChunkProgress, signal)
+        completedChunksBytes = end
       }
 
       // Finalize

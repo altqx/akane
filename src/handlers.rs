@@ -5,8 +5,8 @@ use crate::database::{
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
     AppState, ChunkUploadResponse, ChunkedUpload, FinalizeUploadRequest, ProgressResponse,
-    ProgressUpdate, UploadAccepted, UploadResponse, VideoListResponse, VideoQuery, QueueItem,
-    QueueListResponse,
+    ProgressUpdate, QueueItem, QueueListResponse, UploadAccepted, UploadResponse,
+    VideoListResponse, VideoQuery,
 };
 use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, get_video_height};
 // use aws_sdk_s3::types::{Delete, ObjectIdentifier};
@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::{fs, io::AsyncWriteExt, io::AsyncReadExt};
+use tokio::{fs, io::AsyncReadExt, io::AsyncWriteExt};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -306,7 +306,7 @@ pub async fn upload_video(
                     .progress
                     .write()
                     .await
-                    .insert(upload_id_clone, completion_progress);
+                    .insert(upload_id_clone.clone(), completion_progress);
             }
             Err(e) => {
                 error!("Background processing failed: {:?}", e);
@@ -325,7 +325,16 @@ pub async fn upload_video(
                     .progress
                     .write()
                     .await
-                    .insert(upload_id_clone, error_progress);
+                    .insert(upload_id_clone.clone(), error_progress);
+            }
+        }
+
+        // Clean up completed/failed progress entries after 10 seconds
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let mut progress_map = state_clone.progress.write().await;
+        if let Some(entry) = progress_map.get(&upload_id_clone) {
+            if entry.status == "completed" || entry.status == "failed" {
+                progress_map.remove(&upload_id_clone);
             }
         }
     });
@@ -346,7 +355,12 @@ pub async fn upload_chunk(
         .get("X-Upload-ID")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing X-Upload-ID header".to_string()))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Missing X-Upload-ID header".to_string(),
+            )
+        })?;
 
     let mut chunk_data: Option<Vec<u8>> = None;
     let mut chunk_index: Option<u32> = None;
@@ -375,20 +389,20 @@ pub async fn upload_chunk(
                     .text()
                     .await
                     .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
-                chunk_index = Some(
-                    text.parse()
-                        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid chunk_index".to_string()))?,
-                );
+                chunk_index =
+                    Some(text.parse().map_err(|_| {
+                        (StatusCode::BAD_REQUEST, "Invalid chunk_index".to_string())
+                    })?);
             }
             Some("total_chunks") => {
                 let text = field
                     .text()
                     .await
                     .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
-                total_chunks = Some(
-                    text.parse()
-                        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid total_chunks".to_string()))?,
-                );
+                total_chunks =
+                    Some(text.parse().map_err(|_| {
+                        (StatusCode::BAD_REQUEST, "Invalid total_chunks".to_string())
+                    })?);
             }
             Some("file_name") => {
                 file_name = Some(
@@ -406,8 +420,8 @@ pub async fn upload_chunk(
         chunk_data.ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing chunk data".to_string()))?;
     let chunk_index =
         chunk_index.ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing chunk_index".to_string()))?;
-    let total_chunks =
-        total_chunks.ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing total_chunks".to_string()))?;
+    let total_chunks = total_chunks
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing total_chunks".to_string()))?;
     let file_name =
         file_name.ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing file_name".to_string()))?;
 
@@ -489,7 +503,10 @@ pub async fn upload_chunk(
         current_chunk: received_count,
         total_chunks,
         percentage: (received_count * 100) / total_chunks,
-        details: Some(format!("Received chunk {} of {}", received_count, total_chunks)),
+        details: Some(format!(
+            "Received chunk {} of {}",
+            received_count, total_chunks
+        )),
         status: "processing".to_string(),
         result: None,
         error: None,
@@ -518,7 +535,12 @@ pub async fn finalize_chunked_upload(
         .get("X-Upload-ID")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing X-Upload-ID header".to_string()))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Missing X-Upload-ID header".to_string(),
+            )
+        })?;
 
     info!("Finalizing chunked upload: {}", upload_id);
 
@@ -560,7 +582,8 @@ pub async fn finalize_chunked_upload(
         .insert(upload_id.clone(), progress);
 
     // Assemble chunks into final file
-    let final_path = std::env::temp_dir().join(format!("{}-{}", Uuid::new_v4(), chunked_upload.file_name));
+    let final_path =
+        std::env::temp_dir().join(format!("{}-{}", Uuid::new_v4(), chunked_upload.file_name));
     let mut final_file = fs::File::create(&final_path)
         .await
         .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
@@ -570,13 +593,13 @@ pub async fn finalize_chunked_upload(
         let mut chunk_file = fs::File::open(&chunk_path)
             .await
             .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
-        
+
         let mut buffer = Vec::new();
         chunk_file
             .read_to_end(&mut buffer)
             .await
             .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
-        
+
         final_file
             .write_all(&buffer)
             .await
@@ -733,7 +756,7 @@ pub async fn finalize_chunked_upload(
                     .progress
                     .write()
                     .await
-                    .insert(upload_id_clone, completion_progress);
+                    .insert(upload_id_clone.clone(), completion_progress);
             }
             Err(e) => {
                 error!("Background processing failed: {:?}", e);
@@ -752,7 +775,16 @@ pub async fn finalize_chunked_upload(
                     .progress
                     .write()
                     .await
-                    .insert(upload_id_clone, error_progress);
+                    .insert(upload_id_clone.clone(), error_progress);
+            }
+        }
+
+        // Clean up completed/failed progress entries after 10 seconds
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let mut progress_map = state_clone.progress.write().await;
+        if let Some(entry) = progress_map.get(&upload_id_clone) {
+            if entry.status == "completed" || entry.status == "failed" {
+                progress_map.remove(&upload_id_clone);
             }
         }
     });
@@ -763,11 +795,9 @@ pub async fn finalize_chunked_upload(
     }))
 }
 
-pub async fn list_queues(
-    State(state): State<AppState>,
-) -> Json<QueueListResponse> {
+pub async fn list_queues(State(state): State<AppState>) -> Json<QueueListResponse> {
     let progress_map = state.progress.read().await;
-    
+
     let items: Vec<QueueItem> = progress_map
         .iter()
         .map(|(id, p)| QueueItem {
@@ -781,11 +811,14 @@ pub async fn list_queues(
             video_name: p.video_name.clone(),
         })
         .collect();
-    
-    let active_count = items.iter().filter(|i| i.status == "processing" || i.status == "initializing").count() as u32;
+
+    let active_count = items
+        .iter()
+        .filter(|i| i.status == "processing" || i.status == "initializing")
+        .count() as u32;
     let completed_count = items.iter().filter(|i| i.status == "completed").count() as u32;
     let failed_count = items.iter().filter(|i| i.status == "failed").count() as u32;
-    
+
     Json(QueueListResponse {
         items,
         active_count,
@@ -1261,7 +1294,13 @@ pub async fn get_player(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let ip = addr.ip().to_string();
+    // Use the same IP extraction logic as get_hls_file for token consistency
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| addr.ip().to_string());
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
