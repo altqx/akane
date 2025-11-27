@@ -70,11 +70,17 @@ function generateUUID(): string {
 // Get API base URL - in development with Next.js dev server, go directly to backend
 // to bypass Next.js proxy body size limits for large file uploads
 function getApiBaseUrl(): string {
-  // In development (next dev), the proxy has body size limits
-  // So we bypass it and go directly to the backend
-  if (typeof window !== 'undefined' && window.location.port === '3001') {
+  if (typeof window === 'undefined') return ''
+  
+  // Check if we're in development mode (Next.js dev server on port 3001)
+  // or accessing via basePath which indicates production
+  const isDev = window.location.port === '3001'
+  
+  if (isDev) {
+    // Bypass Next.js proxy for large uploads - go directly to Rust backend
     return 'http://localhost:3000'
   }
+  
   // In production (static export served by backend), use relative paths
   return ''
 }
@@ -99,6 +105,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         const apiBase = getApiBaseUrl()
         // EventSource doesn't support custom headers, so pass token as query param
         const url = token ? `${apiBase}/api/progress/${uploadId}?token=${encodeURIComponent(token)}` : `${apiBase}/api/progress/${uploadId}`
+        console.log('[Upload] Progress EventSource URL:', url)
         const eventSource = new EventSource(url)
         eventSourceRef.current = eventSource
 
@@ -244,7 +251,9 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         xhr.addEventListener('abort', () => reject(new Error('Upload aborted')))
 
         const apiBase = getApiBaseUrl()
-        xhr.open('POST', `${apiBase}/api/upload`)
+        const uploadUrl = `${apiBase}/api/upload`
+        console.log('[Upload] XHR Upload URL:', uploadUrl)
+        xhr.open('POST', uploadUrl)
         xhr.setRequestHeader('X-Upload-ID', uploadId)
         if (token) {
           xhr.setRequestHeader('Authorization', `Bearer ${token}`)
