@@ -4,10 +4,57 @@ import { useRef, FormEvent, useState } from 'react'
 import Navbar from '@/components/Navbar'
 import Button from '@/components/Button'
 import Input from '@/components/Input'
-import ProgressBar from '@/components/ProgressBar'
 import ProcessingQueues from '@/components/ProcessingQueues'
-import { useUpload } from '@/context/UploadContext'
+import { useUpload, UploadItem } from '@/context/UploadContext'
 import { formatFileSize } from '@/utils/format'
+
+function UploadItemCard({ item, onRemove }: { item: UploadItem; onRemove: (id: string) => void }) {
+  const getStatusBadge = () => {
+    switch (item.status) {
+      case 'pending':
+        return <span className='badge badge-ghost badge-sm'>Pending</span>
+      case 'uploading':
+        return <span className='badge badge-primary badge-sm'>Uploading</span>
+      case 'queued':
+        return <span className='badge badge-success badge-sm'>Queued</span>
+      case 'error':
+        return <span className='badge badge-error badge-sm'>Error</span>
+    }
+  }
+
+  return (
+    <div className={`bg-base-200 rounded-lg p-3 ${item.status === 'error' ? 'border border-error/30' : ''}`}>
+      <div className='flex items-center justify-between mb-2'>
+        <div className='flex items-center gap-2 flex-1 min-w-0'>
+          {item.status === 'uploading' && <span className='loading loading-spinner loading-xs'></span>}
+          {item.status === 'queued' && (
+            <svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' strokeLinejoin='round' className='text-success'><polyline points='20 6 9 17 4 12' /></svg>
+          )}
+          {item.status === 'error' && (
+            <svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' strokeLinejoin='round' className='text-error'><circle cx='12' cy='12' r='10' /><line x1='15' x2='9' y1='9' y2='15' /><line x1='9' x2='15' y1='9' y2='15' /></svg>
+          )}
+          <span className='font-medium text-sm truncate' title={item.file.name}>{item.file.name}</span>
+          {getStatusBadge()}
+        </div>
+        {(item.status === 'queued' || item.status === 'error') && (
+          <button className='btn btn-ghost btn-xs' onClick={() => onRemove(item.id)}>✕</button>
+        )}
+      </div>
+      {item.status === 'uploading' && (
+        <div>
+          <progress className='progress progress-primary w-full h-2' value={item.progress} max='100'></progress>
+          <div className='text-xs text-base-content/70 mt-1'>{item.progress}% uploaded</div>
+        </div>
+      )}
+      {item.status === 'error' && item.error && (
+        <div className='text-xs text-error mt-1'>{item.error}</div>
+      )}
+      {item.status === 'queued' && (
+        <div className='text-xs text-success mt-1'>Added to processing queue</div>
+      )}
+    </div>
+  )
+}
 
 export default function Home() {
   const {
@@ -16,29 +63,43 @@ export default function Home() {
     tags,
     setTags,
     isUploading,
-    progress,
-    results,
+    uploadItems,
     error,
     setError,
-    uploadStatus,
     startUpload,
-    clearUploads
+    clearUploads,
+    cancelUpload,
+    removeUploadItem
   } = useUpload()
 
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      setFiles(Array.from(e.target.files))
+      const newFiles = Array.from(e.target.files)
+      setFiles([...files, ...newFiles])
       setError(null)
+      // Reset input so same file can be selected again
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(false)
+    if (e.dataTransfer.files) {
+      const newFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('video/') || f.name.endsWith('.mkv'))
+      if (newFiles.length > 0) {
+        setFiles([...files, ...newFiles])
+        setError(null)
+      }
     }
   }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     await startUpload()
-    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const handleClear = () => {
@@ -46,15 +107,14 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  const copyToClipboard = async (text: string, id: string) => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopiedId(id)
-      setTimeout(() => setCopiedId(null), 2000)
-    } catch (err) {
-      console.error('Failed to copy:', err)
-    }
+  const removeFile = (index: number) => {
+    setFiles(files.filter((_, i) => i !== index))
   }
+
+  // Separate upload items by status
+  const activeUploads = uploadItems.filter(i => i.status === 'uploading' || i.status === 'pending')
+  const queuedUploads = uploadItems.filter(i => i.status === 'queued')
+  const errorUploads = uploadItems.filter(i => i.status === 'error')
 
   return (
     <div className='min-h-screen bg-base-200 p-10 font-sans'>
@@ -62,12 +122,57 @@ export default function Home() {
         <div className='flex justify-between items-center mb-8'>
           <div>
             <h1 className='text-3xl font-bold tracking-tight'>Upload Video</h1>
-            <p className='text-base-content/70 mt-1'>Upload and process your videos for streaming.</p>
+            <p className='text-base-content/70 mt-1'>Upload videos to the processing queue.</p>
           </div>
         </div>
         <Navbar />
 
         <ProcessingQueues />
+
+        {/* Current Upload Progress */}
+        {uploadItems.length > 0 && (
+          <div className='card bg-base-100 shadow-xl mb-6'>
+            <div className='card-body p-4'>
+              <h3 className='card-title text-base flex items-center gap-2'>
+                <svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' strokeLinejoin='round'>
+                  <path d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' />
+                  <polyline points='17 8 12 3 7 8' />
+                  <line x1='12' x2='12' y1='3' y2='15' />
+                </svg>
+                Upload Progress
+                {activeUploads.length > 0 && <span className='badge badge-primary badge-sm'>{activeUploads.length} uploading</span>}
+              </h3>
+              
+              <div className='space-y-2 mt-2'>
+                {activeUploads.map(item => (
+                  <UploadItemCard key={item.id} item={item} onRemove={removeUploadItem} />
+                ))}
+                {queuedUploads.length > 0 && (
+                  <div className='text-xs font-semibold text-base-content/70 uppercase tracking-wider mt-3 mb-1'>
+                    Successfully Queued ({queuedUploads.length})
+                  </div>
+                )}
+                {queuedUploads.map(item => (
+                  <UploadItemCard key={item.id} item={item} onRemove={removeUploadItem} />
+                ))}
+                {errorUploads.length > 0 && (
+                  <div className='text-xs font-semibold text-error uppercase tracking-wider mt-3 mb-1'>
+                    Failed ({errorUploads.length})
+                  </div>
+                )}
+                {errorUploads.map(item => (
+                  <UploadItemCard key={item.id} item={item} onRemove={removeUploadItem} />
+                ))}
+              </div>
+
+              {isUploading && (
+                <div className='flex justify-end mt-2'>
+                  <Button size='sm' variant='secondary' onClick={cancelUpload}>Cancel Upload</Button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         <div className='card bg-base-100 shadow-xl'>
           <div className='card-body'>
@@ -79,30 +184,32 @@ export default function Home() {
                 hint='Separate tags with commas (applied to all files)'
                 value={tags}
                 onChange={(e) => setTags(e.target.value)}
-                disabled={isUploading}
               />
 
               <div className='form-control w-full'>
                 <div className='label'>
                   <span className='label-text'>Video Files *</span>
                 </div>
-                <div className='relative'>
+                <div 
+                  className={`relative border-2 border-dashed rounded-lg transition-colors ${isDragging ? 'border-primary bg-primary/5' : 'border-base-300'}`}
+                  onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
+                  onDragLeave={() => setIsDragging(false)}
+                  onDrop={handleDrop}
+                >
                   <input
                     ref={fileInputRef}
                     type='file'
                     id='fileInput'
                     accept='video/*,.mkv'
                     multiple
-                    required
                     onChange={handleFileChange}
-                    disabled={isUploading}
-                    className='file-input file-input-bordered w-full h-32 pt-10 text-center'
+                    className='absolute inset-0 w-full h-full opacity-0 cursor-pointer'
                   />
-                  <div className='absolute inset-0 pointer-events-none flex flex-col items-center justify-center text-base-content/50'>
+                  <div className='flex flex-col items-center justify-center py-8 text-base-content/50'>
                     <svg
                       xmlns='http://www.w3.org/2000/svg'
-                      width='24'
-                      height='24'
+                      width='32'
+                      height='32'
                       viewBox='0 0 24 24'
                       fill='none'
                       stroke='currentColor'
@@ -115,24 +222,25 @@ export default function Home() {
                       <polyline points='17 8 12 3 7 8' />
                       <line x1='12' x2='12' y1='3' y2='15' />
                     </svg>
-                    <span className='text-sm'>Click to select or drag and drop video files</span>
+                    <span className='text-sm font-medium'>Drop files here or click to select</span>
+                    <span className='text-xs mt-1'>You can upload while previous files are processing</span>
                   </div>
-                </div>
-                <div className='label'>
-                  <span className='label-text-alt text-base-content/70'>Select one or more video files</span>
                 </div>
               </div>
 
               {files.length > 0 && (
                 <div className='bg-base-200 rounded-box p-4'>
+                  <div className='text-xs font-semibold text-base-content/70 uppercase tracking-wider mb-2'>
+                    Ready to Upload ({files.length})
+                  </div>
                   <div className='flex flex-col gap-2'>
                     {files.map((file, idx) => (
                       <div
                         key={idx}
-                        className='flex items-center justify-between border-b border-base-300 py-2 last:border-0'
+                        className='flex items-center justify-between bg-base-100 rounded-lg px-3 py-2'
                       >
-                        <div className='flex items-center gap-3'>
-                          <div className='h-8 w-8 rounded bg-primary/10 flex items-center justify-center text-primary'>
+                        <div className='flex items-center gap-3 min-w-0'>
+                          <div className='h-8 w-8 rounded bg-primary/10 flex items-center justify-center text-primary flex-shrink-0'>
                             <svg
                               xmlns='http://www.w3.org/2000/svg'
                               width='16'
@@ -148,12 +256,12 @@ export default function Home() {
                               <rect width='14' height='12' x='2' y='6' rx='2' ry='2' />
                             </svg>
                           </div>
-                          <div>
-                            <div className='font-medium text-sm'>{file.name}</div>
+                          <div className='min-w-0'>
+                            <div className='font-medium text-sm truncate'>{file.name}</div>
                             <div className='text-xs text-base-content/70'>{formatFileSize(file.size)}</div>
                           </div>
                         </div>
-                        <div className='badge badge-secondary'>Pending</div>
+                        <button type='button' className='btn btn-ghost btn-xs' onClick={() => removeFile(idx)}>✕</button>
                       </div>
                     ))}
                   </div>
@@ -161,38 +269,25 @@ export default function Home() {
               )}
 
               <div className='flex gap-3 pt-2'>
-                <Button type='submit' disabled={isUploading || files.length === 0} className='flex-1'>
+                <Button type='submit' disabled={files.length === 0} className='flex-1'>
                   {isUploading ? (
                     <span className='flex items-center gap-2'>
                       <span className='loading loading-spinner loading-sm'></span>
-                      {uploadStatus}
+                      Uploading...
                     </span>
                   ) : (
-                    'Upload All'
+                    `Upload ${files.length > 0 ? `(${files.length} file${files.length > 1 ? 's' : ''})` : ''}`
                   )}
                 </Button>
                 <Button
                   type='button'
                   variant='secondary'
-                  disabled={isUploading}
                   onClick={handleClear}
                   className='flex-1'
                 >
                   Clear
                 </Button>
               </div>
-
-              {progress && (
-                <div className='mt-2'>
-                  <ProgressBar
-                    percentage={progress.percentage}
-                    stage={progress.stage}
-                    currentChunk={progress.current_chunk}
-                    totalChunks={progress.total_chunks}
-                    details={progress.details}
-                  />
-                </div>
-              )}
             </form>
           </div>
         </div>
@@ -213,113 +308,6 @@ export default function Home() {
               />
             </svg>
             <span>{error}</span>
-          </div>
-        )}
-
-        {results.length > 0 && (
-          <div className='mt-8 animate-in fade-in slide-in-from-bottom-4 duration-500'>
-            <h3 className='mb-4 text-lg font-semibold flex items-center gap-2'>
-              <svg
-                xmlns='http://www.w3.org/2000/svg'
-                width='20'
-                height='20'
-                viewBox='0 0 24 24'
-                fill='none'
-                stroke='currentColor'
-                strokeWidth='2'
-                strokeLinecap='round'
-                strokeLinejoin='round'
-                className='text-success'
-              >
-                <polyline points='20 6 9 17 4 12' />
-              </svg>
-              Upload Results
-            </h3>
-            <div className='flex flex-col gap-4'>
-              {results.map((result, idx) => (
-                <div
-                  key={idx}
-                  className={`card border overflow-hidden ${
-                    result.success ? 'border-success/20 bg-base-100' : 'border-error/20 bg-error/5'
-                  }`}
-                >
-                  <div className={`p-4 border-b ${result.success ? 'border-success/10' : 'border-error/10'}`}>
-                    <div className='flex items-center justify-between'>
-                      <div className='font-medium flex items-center gap-2'>
-                        {result.success ? (
-                          <div className='h-6 w-6 rounded-full bg-success/20 text-success flex items-center justify-center'>
-                            ✓
-                          </div>
-                        ) : (
-                          <div className='h-6 w-6 rounded-full bg-error/20 text-error flex items-center justify-center'>
-                            ✗
-                          </div>
-                        )}
-                        {result.file}
-                      </div>
-                      {result.success && <span className='text-xs text-success font-medium'>Completed</span>}
-                    </div>
-                  </div>
-
-                  {result.success && result.data ? (
-                    <div className='p-4 bg-base-200/50'>
-                      <div className='flex flex-col gap-3'>
-                        <label className='text-xs font-medium text-base-content/70 uppercase tracking-wider'>
-                          Embed Code
-                        </label>
-                        <div className='relative group'>
-                          <div className='absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity'>
-                            <Button
-                              size='sm'
-                              variant='secondary'
-                              className='h-8 px-3 text-xs'
-                              onClick={() =>
-                                copyToClipboard(
-                                  `<iframe src="${window.location.origin}${result.data?.player_url}" width="100%" height="100%" frameborder="0" allowfullscreen></iframe>`,
-                                  idx.toString()
-                                )
-                              }
-                            >
-                              {copiedId === idx.toString() ? 'Copied!' : 'Copy Code'}
-                            </Button>
-                          </div>
-                          <pre className='p-4 rounded-lg bg-base-100 border border-base-300 overflow-x-auto text-sm font-mono'>
-                            {`<iframe src="${window.location.origin}${result.data.player_url}" width="100%" height="100%" frameborder="0" allowfullscreen></iframe>`}
-                          </pre>
-                        </div>
-                        <div className='flex justify-end'>
-                          <a
-                            href={result.data.player_url}
-                            target='_blank'
-                            rel='noopener noreferrer'
-                            className='link link-primary text-xs flex items-center gap-1'
-                          >
-                            Open Player Page
-                            <svg
-                              xmlns='http://www.w3.org/2000/svg'
-                              width='12'
-                              height='12'
-                              viewBox='0 0 24 24'
-                              fill='none'
-                              stroke='currentColor'
-                              strokeWidth='2'
-                              strokeLinecap='round'
-                              strokeLinejoin='round'
-                            >
-                              <path d='M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6' />
-                              <polyline points='15 3 21 3 21 9' />
-                              <line x1='10' x2='21' y1='14' y2='3' />
-                            </svg>
-                          </a>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className='p-4 text-sm text-error'>Error: {result.error}</div>
-                  )}
-                </div>
-              ))}
-            </div>
           </div>
         )}
       </div>
