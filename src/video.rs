@@ -160,6 +160,11 @@ pub async fn encode_to_hls(
             // Update progress before starting this variant
             let current_chunk = (index + 1) as u32;
             let percentage = (((current_chunk as f32) / (total_variants as f32)) * 100.0) as u32;
+            // Preserve video_name from existing progress
+            let existing_video_name = {
+                let progress_map = progress.read().await;
+                progress_map.get(&upload_id).and_then(|p| p.video_name.clone())
+            };
             let start_progress = ProgressUpdate {
                 stage: "FFmpeg processing".to_string(),
                 current_chunk,
@@ -172,6 +177,7 @@ pub async fn encode_to_hls(
                 status: "processing".to_string(),
                 result: None,
                 error: None,
+                video_name: existing_video_name.clone(),
             };
             progress
                 .write()
@@ -323,6 +329,7 @@ pub async fn encode_to_hls(
                 status: "processing".to_string(),
                 result: None,
                 error: None,
+                video_name: existing_video_name,
             };
             progress
                 .write()

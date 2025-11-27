@@ -55,6 +55,7 @@ pub async fn upload_video(
             status: "initializing".to_string(),
             result: None,
             error: None,
+            video_name: None,
         };
         state
             .progress
@@ -106,6 +107,7 @@ pub async fn upload_video(
                             status: "processing".to_string(),
                             result: None,
                             error: None,
+                            video_name: None,
                         };
                         state
                             .progress
@@ -160,7 +162,7 @@ pub async fn upload_video(
         )
     })?;
 
-    // Initialize progress
+    // Initialize progress with video name
     let initial_progress = ProgressUpdate {
         stage: "Queued for processing".to_string(),
         current_chunk: 0,
@@ -170,6 +172,7 @@ pub async fn upload_video(
         status: "processing".to_string(),
         result: None,
         error: None,
+        video_name: Some(video_name.clone()),
     };
     state
         .progress
@@ -214,6 +217,7 @@ pub async fn upload_video(
                 status: "processing".to_string(),
                 result: None,
                 error: None,
+                video_name: Some(video_name_clone.clone()),
             };
             state_clone
                 .progress
@@ -241,6 +245,7 @@ pub async fn upload_video(
                 status: "processing".to_string(),
                 result: None,
                 error: None,
+                video_name: Some(video_name_clone.clone()),
             };
             state_clone
                 .progress
@@ -294,6 +299,7 @@ pub async fn upload_video(
                     status: "completed".to_string(),
                     result: Some(response),
                     error: None,
+                    video_name: Some(video_name_clone.clone()),
                 };
                 state_clone
                     .progress
@@ -312,6 +318,7 @@ pub async fn upload_video(
                     status: "failed".to_string(),
                     result: None,
                     error: Some(e.to_string()),
+                    video_name: Some(video_name_clone.clone()),
                 };
                 state_clone
                     .progress
@@ -343,6 +350,7 @@ pub async fn list_queues(
             percentage: p.percentage,
             details: p.details.clone(),
             status: p.status.clone(),
+            video_name: p.video_name.clone(),
         })
         .collect();
     

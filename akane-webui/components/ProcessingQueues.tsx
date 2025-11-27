@@ -10,6 +10,7 @@ interface QueueItem {
   percentage: number
   details: string | null
   status: string
+  video_name: string | null
 }
 
 interface QueueListResponse {
@@ -181,9 +182,16 @@ export default function ProcessingQueues() {
                       <div className='flex items-center justify-between mb-2'>
                         <div className='flex items-center gap-2'>
                           <span className='loading loading-spinner loading-xs'></span>
-                          <span className='font-medium text-sm truncate max-w-[200px]' title={item.upload_id}>
-                            {item.upload_id.substring(0, 8)}...
-                          </span>
+                          <div className='flex flex-col'>
+                            <span className='font-medium text-sm truncate max-w-[250px]' title={item.video_name || item.upload_id}>
+                              {item.video_name || `${item.upload_id.substring(0, 8)}...`}
+                            </span>
+                            {item.video_name && (
+                              <span className='text-xs text-base-content/50'>
+                                ID: {item.upload_id.substring(0, 8)}...
+                              </span>
+                            )}
+                          </div>
                           {getStatusBadge(item.status)}
                         </div>
                         <span className='text-sm font-bold'>{item.percentage}%</span>
@@ -233,8 +241,8 @@ export default function ProcessingQueues() {
                         >
                           <polyline points='20 6 9 17 4 12' />
                         </svg>
-                        <span className='text-sm truncate max-w-[200px]' title={item.upload_id}>
-                          {item.upload_id.substring(0, 8)}...
+                        <span className='text-sm truncate max-w-[250px]' title={item.video_name || item.upload_id}>
+                          {item.video_name || `${item.upload_id.substring(0, 8)}...`}
                         </span>
                       </div>
                       {getStatusBadge(item.status)}
@@ -273,8 +281,8 @@ export default function ProcessingQueues() {
                           <line x1='15' x2='9' y1='9' y2='15' />
                           <line x1='9' x2='15' y1='9' y2='15' />
                         </svg>
-                        <span className='text-sm truncate max-w-[200px]' title={item.upload_id}>
-                          {item.upload_id.substring(0, 8)}...
+                        <span className='text-sm truncate max-w-[250px]' title={item.video_name || item.upload_id}>
+                          {item.video_name || `${item.upload_id.substring(0, 8)}...`}
                         </span>
                       </div>
                       <div className='flex items-center gap-2'>
