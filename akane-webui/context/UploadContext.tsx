@@ -67,6 +67,18 @@ function generateUUID(): string {
   })
 }
 
+// Get API base URL - in development with Next.js dev server, go directly to backend
+// to bypass Next.js proxy body size limits for large file uploads
+function getApiBaseUrl(): string {
+  // In development (next dev), the proxy has body size limits
+  // So we bypass it and go directly to the backend
+  if (typeof window !== 'undefined' && window.location.port === '3001') {
+    return 'http://localhost:3000'
+  }
+  // In production (static export served by backend), use relative paths
+  return ''
+}
+
 export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [files, setFiles] = useState<File[]>([])
   const [tags, setTags] = useState('')
@@ -84,8 +96,9 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const createProgressListener = useCallback(
     (uploadId: string, token: string | null): Promise<{ player_url: string; upload_id: string }> => {
       return new Promise((resolve, reject) => {
+        const apiBase = getApiBaseUrl()
         // EventSource doesn't support custom headers, so pass token as query param
-        const url = token ? `/api/progress/${uploadId}?token=${encodeURIComponent(token)}` : `/api/progress/${uploadId}`
+        const url = token ? `${apiBase}/api/progress/${uploadId}?token=${encodeURIComponent(token)}` : `${apiBase}/api/progress/${uploadId}`
         const eventSource = new EventSource(url)
         eventSourceRef.current = eventSource
 
@@ -230,7 +243,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         xhr.addEventListener('error', () => reject(new Error('Network error during upload')))
         xhr.addEventListener('abort', () => reject(new Error('Upload aborted')))
 
-        xhr.open('POST', '/api/upload')
+        const apiBase = getApiBaseUrl()
+        xhr.open('POST', `${apiBase}/api/upload`)
         xhr.setRequestHeader('X-Upload-ID', uploadId)
         if (token) {
           xhr.setRequestHeader('Authorization', `Bearer ${token}`)

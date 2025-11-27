@@ -18,7 +18,7 @@ uuid = { version = "1.18.1", features = ["v4"] }
 anyhow = "1.0"
 tokio-stream = "0.1"
 serde_yaml = "0.9"
-tower-http = { version = "0.6.7", features = ["fs", "trace"] }
+tower-http = { version = "0.6.7", features = ["fs", "trace", "cors"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite"] }
 chrono = "0.4.42"
 hmac = "0.12.1"

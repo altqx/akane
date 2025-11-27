@@ -12,7 +12,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::{
     Router,
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{StatusCode, header, Method},
     middleware::{self, Next},
     response::Redirect,
     response::Response,
@@ -21,6 +21,7 @@ use axum::{
 use config::Config;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -136,6 +137,14 @@ async fn main() -> Result<()> {
         // e.g. 1 GB body limit
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
+        // CORS layer for development (Next.js dev server on different port)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers(Any)
+                .expose_headers(Any),
+        )
         .with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse().unwrap();
