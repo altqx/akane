@@ -115,10 +115,7 @@ export default function ProcessingQueues() {
   return (
     <div className='card bg-base-100 shadow-xl mb-6'>
       <div className='card-body p-4'>
-        <div
-          className='flex items-center justify-between cursor-pointer'
-          onClick={() => setIsCollapsed(!isCollapsed)}
-        >
+        <div className='flex items-center justify-between cursor-pointer' onClick={() => setIsCollapsed(!isCollapsed)}>
           <h3 className='card-title text-base flex items-center gap-2'>
             <svg
               xmlns='http://www.w3.org/2000/svg'
@@ -141,15 +138,9 @@ export default function ProcessingQueues() {
           </h3>
           <div className='flex items-center gap-2'>
             <div className='flex gap-1 text-xs'>
-              {queues.active_count > 0 && (
-                <span className='text-primary'>{queues.active_count} processing</span>
-              )}
-              {queues.completed_count > 0 && (
-                <span className='text-success'>• {queues.completed_count} completed</span>
-              )}
-              {queues.failed_count > 0 && (
-                <span className='text-error'>• {queues.failed_count} failed</span>
-              )}
+              {queues.active_count > 0 && <span className='text-primary'>{queues.active_count} processing</span>}
+              {queues.completed_count > 0 && <span className='text-success'>• {queues.completed_count} completed</span>}
+              {queues.failed_count > 0 && <span className='text-error'>• {queues.failed_count} failed</span>}
             </div>
             <svg
               xmlns='http://www.w3.org/2000/svg'
@@ -183,7 +174,10 @@ export default function ProcessingQueues() {
                         <div className='flex items-center gap-2'>
                           <span className='loading loading-spinner loading-xs'></span>
                           <div className='flex flex-col'>
-                            <span className='font-medium text-sm truncate max-w-[250px]' title={item.video_name || item.upload_id}>
+                            <span
+                              className='font-medium text-sm truncate max-w-[250px]'
+                              title={item.video_name || item.upload_id}
+                            >
                               {item.video_name || `${item.upload_id.substring(0, 8)}...`}
                             </span>
                             {item.video_name && (

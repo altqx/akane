@@ -2,19 +2,30 @@
 
 import React, { createContext, useContext, useState, useCallback, useRef } from 'react'
 
+export interface FileWithMetadata {
+  id: string
+  file: File
+  name: string // custom video name
+  tags: string // custom tags for this file
+}
+
 export interface UploadItem {
   id: string
   file: File
+  name: string
+  tags: string
   status: 'pending' | 'uploading' | 'queued' | 'error'
   progress: number
+  speed: number // bytes per second
   error?: string
 }
 
 interface UploadContextType {
-  files: File[]
-  setFiles: (files: File[]) => void
-  tags: string
-  setTags: (tags: string) => void
+  files: FileWithMetadata[]
+  setFiles: (files: FileWithMetadata[]) => void
+  addFiles: (newFiles: File[]) => void
+  updateFileMetadata: (id: string, updates: Partial<Pick<FileWithMetadata, 'name' | 'tags'>>) => void
+  removeFile: (id: string) => void
   isUploading: boolean
   uploadItems: UploadItem[]
   error: string | null
@@ -58,24 +69,42 @@ function getApiBaseUrl(): string {
 }
 
 export function UploadProvider({ children }: { children: React.ReactNode }) {
-  const [files, setFiles] = useState<File[]>([])
-  const [tags, setTags] = useState('')
+  const [files, setFiles] = useState<FileWithMetadata[]>([])
   const [isUploading, setIsUploading] = useState(false)
   const [uploadItems, setUploadItems] = useState<UploadItem[]>([])
   const [error, setError] = useState<string | null>(null)
 
   const abortControllerRef = useRef<AbortController | null>(null)
 
+  // Add new files with default metadata
+  const addFiles = useCallback((newFiles: File[]) => {
+    const filesWithMetadata: FileWithMetadata[] = newFiles.map((file) => ({
+      id: generateUUID(),
+      file,
+      name: file.name.replace(/\.[^/.]+$/, ''), // default to filename without extension
+      tags: ''
+    }))
+    setFiles((prev) => [...prev, ...filesWithMetadata])
+  }, [])
+
+  // Update file metadata (name or tags)
+  const updateFileMetadata = useCallback((id: string, updates: Partial<Pick<FileWithMetadata, 'name' | 'tags'>>) => {
+    setFiles((prev) => prev.map((f) => (f.id === id ? { ...f, ...updates } : f)))
+  }, [])
+
+  // Remove a file from the list
+  const removeFile = useCallback((id: string) => {
+    setFiles((prev) => prev.filter((f) => f.id !== id))
+  }, [])
+
   // Update a single upload item's state
   const updateUploadItem = useCallback((id: string, updates: Partial<UploadItem>) => {
-    setUploadItems(prev => prev.map(item => 
-      item.id === id ? { ...item, ...updates } : item
-    ))
+    setUploadItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...updates } : item)))
   }, [])
 
   // Remove an upload item from the list
   const removeUploadItem = useCallback((id: string) => {
-    setUploadItems(prev => prev.filter(item => item.id !== id))
+    setUploadItems((prev) => prev.filter((item) => item.id !== id))
   }, [])
 
   // Upload a single chunk
@@ -116,7 +145,13 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
   // Finalize a chunked upload
   const finalizeUpload = useCallback(
-    async (uploadId: string, fileName: string, fileTags: string, token: string | null, signal?: AbortSignal): Promise<void> => {
+    async (
+      uploadId: string,
+      videoName: string,
+      fileTags: string,
+      token: string | null,
+      signal?: AbortSignal
+    ): Promise<void> => {
       const apiBase = getApiBaseUrl()
       const response = await fetch(`${apiBase}/api/upload/finalize`, {
         method: 'POST',
@@ -126,7 +161,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({
-          name: fileName.replace(/\.[^/.]+$/, ''),
+          name: videoName,
           tags: fileTags.trim() || undefined
         }),
         signal
@@ -142,44 +177,62 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
   // Upload file in chunks (for large files > 50MB)
   const uploadFileChunked = useCallback(
-    async (file: File, uploadId: string, token: string | null, fileTags: string, onProgress: (progress: number) => void, signal?: AbortSignal): Promise<void> => {
+    async (
+      file: File,
+      uploadId: string,
+      token: string | null,
+      videoName: string,
+      fileTags: string,
+      onProgress: (progress: number, bytesUploaded: number) => void,
+      signal?: AbortSignal
+    ): Promise<void> => {
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+      let totalBytesUploaded = 0
 
       for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
         if (signal?.aborted) throw new Error('Upload cancelled')
-        
+
         const start = chunkIndex * CHUNK_SIZE
         const end = Math.min(start + CHUNK_SIZE, file.size)
         const chunk = file.slice(start, end)
 
         await uploadChunk(chunk, uploadId, chunkIndex, totalChunks, file.name, token, signal)
-        onProgress(Math.round(((chunkIndex + 1) / totalChunks) * 90)) // 0-90% for chunks
+        totalBytesUploaded = end
+        onProgress(Math.round(((chunkIndex + 1) / totalChunks) * 90), totalBytesUploaded) // 0-90% for chunks
       }
 
       // Finalize
-      onProgress(95)
-      await finalizeUpload(uploadId, file.name, fileTags, token, signal)
-      onProgress(100)
+      onProgress(95, file.size)
+      await finalizeUpload(uploadId, videoName, fileTags, token, signal)
+      onProgress(100, file.size)
     },
     [uploadChunk, finalizeUpload]
   )
 
   // Upload file in a single request (for small files <= 50MB)
   const uploadFileSingle = useCallback(
-    async (file: File, uploadId: string, token: string | null, fileTags: string, onProgress: (progress: number) => void, signal?: AbortSignal): Promise<void> => {
+    async (
+      file: File,
+      uploadId: string,
+      token: string | null,
+      videoName: string,
+      fileTags: string,
+      onProgress: (progress: number, bytesUploaded: number) => void,
+      signal?: AbortSignal
+    ): Promise<void> => {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest()
         const formData = new FormData()
 
         formData.append('file', file)
-        formData.append('name', file.name.replace(/\.[^/.]+$/, ''))
+        formData.append('name', videoName)
         if (fileTags.trim()) {
           formData.append('tags', fileTags.trim())
         }
 
         xhr.upload.addEventListener('progress', (event) => {
           if (event.lengthComputable) {
-            onProgress(Math.round((event.loaded / event.total) * 100))
+            onProgress(Math.round((event.loaded / event.total) * 100), event.loaded)
           }
         })
 
@@ -220,24 +273,60 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
   // Upload a single file (decides between chunked and single based on size)
   const uploadSingleFile = useCallback(
-    async (item: UploadItem, token: string | null, fileTags: string, signal?: AbortSignal): Promise<void> => {
-      const onProgress = (progress: number) => {
-        updateUploadItem(item.id, { progress })
+    async (item: UploadItem, token: string | null, signal?: AbortSignal): Promise<void> => {
+      // Track progress with 1-second throttling
+      let lastUpdateTime = Date.now()
+      let lastBytesUploaded = 0
+      let latestProgress = 0
+      let latestBytesUploaded = 0
+      let updateIntervalId: ReturnType<typeof setInterval> | null = null
+
+      const onProgress = (progress: number, bytesUploaded: number) => {
+        latestProgress = progress
+        latestBytesUploaded = bytesUploaded
       }
 
-      updateUploadItem(item.id, { status: 'uploading', progress: 0 })
+      // Start interval to update UI every second
+      const startProgressInterval = () => {
+        updateIntervalId = setInterval(() => {
+          const now = Date.now()
+          const timeDelta = (now - lastUpdateTime) / 1000 // seconds
+          const bytesDelta = latestBytesUploaded - lastBytesUploaded
+          const speed = timeDelta > 0 ? bytesDelta / timeDelta : 0
+
+          updateUploadItem(item.id, {
+            progress: latestProgress,
+            speed: speed
+          })
+
+          lastUpdateTime = now
+          lastBytesUploaded = latestBytesUploaded
+        }, 1000)
+      }
+
+      const stopProgressInterval = () => {
+        if (updateIntervalId) {
+          clearInterval(updateIntervalId)
+          updateIntervalId = null
+        }
+      }
+
+      updateUploadItem(item.id, { status: 'uploading', progress: 0, speed: 0 })
+      startProgressInterval()
 
       try {
         if (item.file.size > CHUNK_SIZE) {
-          await uploadFileChunked(item.file, item.id, token, fileTags, onProgress, signal)
+          await uploadFileChunked(item.file, item.id, token, item.name, item.tags, onProgress, signal)
         } else {
-          await uploadFileSingle(item.file, item.id, token, fileTags, onProgress, signal)
+          await uploadFileSingle(item.file, item.id, token, item.name, item.tags, onProgress, signal)
         }
-        
-        updateUploadItem(item.id, { status: 'queued', progress: 100 })
+
+        stopProgressInterval()
+        updateUploadItem(item.id, { status: 'queued', progress: 100, speed: 0 })
       } catch (err) {
+        stopProgressInterval()
         const errorMessage = err instanceof Error ? err.message : String(err)
-        updateUploadItem(item.id, { status: 'error', error: errorMessage })
+        updateUploadItem(item.id, { status: 'error', error: errorMessage, speed: 0 })
         throw err
       }
     },
@@ -257,25 +346,27 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     abortControllerRef.current = abortController
 
     const token = localStorage.getItem('admin_token')
-    const currentTags = tags // Capture tags at upload time
 
-    // Create upload items for all files
-    const newItems: UploadItem[] = files.map(file => ({
+    // Create upload items for all files with their metadata
+    const newItems: UploadItem[] = files.map((f) => ({
       id: generateUUID(),
-      file,
+      file: f.file,
+      name: f.name,
+      tags: f.tags,
       status: 'pending' as const,
-      progress: 0
+      progress: 0,
+      speed: 0
     }))
 
-    setUploadItems(prev => [...prev, ...newItems])
+    setUploadItems((prev) => [...prev, ...newItems])
     setFiles([]) // Clear the file input immediately so user can add more
 
     // Upload files sequentially (to avoid overwhelming the server)
     for (const item of newItems) {
       if (abortController.signal.aborted) break
-      
+
       try {
-        await uploadSingleFile(item, token, currentTags, abortController.signal)
+        await uploadSingleFile(item, token, abortController.signal)
       } catch (err) {
         // Error already handled in uploadSingleFile, continue with next file
         console.error(`Failed to upload ${item.file.name}:`, err)
@@ -284,7 +375,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
     setIsUploading(false)
     abortControllerRef.current = null
-  }, [files, tags, uploadSingleFile])
+  }, [files, uploadSingleFile])
 
   const cancelUpload = useCallback(() => {
     if (abortControllerRef.current) {
@@ -298,7 +389,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const clearUploads = useCallback(() => {
     setFiles([])
     // Only clear completed/error items, keep uploading ones
-    setUploadItems(prev => prev.filter(item => item.status === 'uploading'))
+    setUploadItems((prev) => prev.filter((item) => item.status === 'uploading'))
     setError(null)
   }, [])
 
@@ -307,8 +398,9 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       value={{
         files,
         setFiles,
-        tags,
-        setTags,
+        addFiles,
+        updateFileMetadata,
+        removeFile,
         isUploading,
         uploadItems,
         error,
