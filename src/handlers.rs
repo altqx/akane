@@ -5,7 +5,7 @@ use crate::database::{
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
     AppState, ProgressResponse, ProgressUpdate, UploadAccepted, UploadResponse, VideoListResponse,
-    VideoQuery,
+    VideoQuery, QueueItem, QueueListResponse,
 };
 use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, get_video_height};
 // use aws_sdk_s3::types::{Delete, ObjectIdentifier};
@@ -326,6 +326,36 @@ pub async fn upload_video(
         upload_id,
         message: "File uploaded successfully, processing started in background".to_string(),
     }))
+}
+
+pub async fn list_queues(
+    State(state): State<AppState>,
+) -> Json<QueueListResponse> {
+    let progress_map = state.progress.read().await;
+    
+    let items: Vec<QueueItem> = progress_map
+        .iter()
+        .map(|(id, p)| QueueItem {
+            upload_id: id.clone(),
+            stage: p.stage.clone(),
+            current_chunk: p.current_chunk,
+            total_chunks: p.total_chunks,
+            percentage: p.percentage,
+            details: p.details.clone(),
+            status: p.status.clone(),
+        })
+        .collect();
+    
+    let active_count = items.iter().filter(|i| i.status == "processing" || i.status == "initializing").count() as u32;
+    let completed_count = items.iter().filter(|i| i.status == "completed").count() as u32;
+    let failed_count = items.iter().filter(|i| i.status == "failed").count() as u32;
+    
+    Json(QueueListResponse {
+        items,
+        active_count,
+        completed_count,
+        failed_count,
+    })
 }
 
 pub async fn get_progress(

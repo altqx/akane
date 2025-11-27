@@ -5,6 +5,7 @@ import Navbar from '@/components/Navbar'
 import Button from '@/components/Button'
 import Input from '@/components/Input'
 import ProgressBar from '@/components/ProgressBar'
+import ProcessingQueues from '@/components/ProcessingQueues'
 import { useUpload } from '@/context/UploadContext'
 import { formatFileSize } from '@/utils/format'
 
@@ -65,6 +66,8 @@ export default function Home() {
           </div>
         </div>
         <Navbar />
+
+        <ProcessingQueues />
 
         <div className='card bg-base-100 shadow-xl'>
           <div className='card-body'>

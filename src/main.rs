@@ -109,6 +109,7 @@ async fn main() -> Result<()> {
     let protected_routes = Router::new()
         .route("/upload", post(handlers::upload_video))
         .route("/videos", get(handlers::list_videos))
+        .route("/queues", get(handlers::list_queues))
         .route("/auth/check", get(check_auth))
         //.route("/purge", delete(handlers::purge_bucket))
         .layer(middleware::from_fn_with_state(

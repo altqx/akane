@@ -93,3 +93,22 @@ pub struct VideoListResponse {
     pub has_next: bool,
     pub has_prev: bool,
 }
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QueueItem {
+    pub upload_id: String,
+    pub stage: String,
+    pub current_chunk: u32,
+    pub total_chunks: u32,
+    pub percentage: u32,
+    pub details: Option<String>,
+    pub status: String,
+}
+
+#[derive(Serialize)]
+pub struct QueueListResponse {
+    pub items: Vec<QueueItem>,
+    pub active_count: u32,
+    pub completed_count: u32,
+    pub failed_count: u32,
+}
