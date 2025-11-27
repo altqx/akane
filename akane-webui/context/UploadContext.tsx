@@ -48,6 +48,25 @@ const UploadContext = createContext<UploadContextType | undefined>(undefined)
 const PROGRESS_TIMEOUT_MS = 60000 // 60 seconds
 const SSE_CLOSE_GRACE_PERIOD_MS = 100 // 100ms grace period to process completion message
 
+// Fallback UUID generator for browsers that don't support crypto.randomUUID
+function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  // Fallback implementation using crypto.getRandomValues
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    return '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, (c) =>
+      (+c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (+c / 4)))).toString(16)
+    )
+  }
+  // Last resort fallback using Math.random (less secure but works everywhere)
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    const v = c === 'x' ? r : (r & 0x3) | 0x8
+    return v.toString(16)
+  })
+}
+
 export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [files, setFiles] = useState<File[]>([])
   const [tags, setTags] = useState('')
@@ -228,6 +247,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   )
 
   const startUpload = useCallback(async () => {
+    console.log('[Upload] startUpload called, files:', files.length)
+    
     if (files.length === 0) {
       setError('Please select at least one video file.')
       return
@@ -242,21 +263,36 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
     for (let i = 0; i < filesToUpload.length; i++) {
       const file = filesToUpload[i]
+      console.log(`[Upload] Processing file ${i + 1}/${filesToUpload.length}: ${file.name}`)
       setUploadStatus(`Processing ${i + 1} of ${filesToUpload.length}: ${file.name}`)
       setProgress(null)
 
-      const uploadId = crypto.randomUUID()
+      const uploadId = generateUUID()
       const token = localStorage.getItem('admin_token')
+      console.log(`[Upload] Upload ID: ${uploadId}, Token exists: ${!!token}`)
 
       try {
-        // Start listening to progress stream first
+        // Start upload and progress listener in parallel
+        // The upload will initialize progress on the server, and the progress listener
+        // will wait up to 60 seconds for the progress to appear
+        console.log('[Upload] Starting file upload...')
+        const uploadPromise = uploadFile(file, uploadId, token)
+        
+        // Small delay to ensure the upload request reaches the server first
+        // This gives the server time to initialize the progress entry
+        await new Promise(resolve => setTimeout(resolve, 100))
+        
+        console.log('[Upload] Starting progress listener...')
         const processingPromise = createProgressListener(uploadId, token)
 
-        // Then upload the file
-        await uploadFile(file, uploadId, token)
+        // Wait for upload to complete (file transfer to server)
+        console.log('[Upload] Waiting for upload to complete...')
+        await uploadPromise
+        console.log('[Upload] Upload completed, waiting for processing...')
 
-        // Wait for processing to complete
+        // Wait for processing to complete (encoding + R2 upload)
         const data = await processingPromise
+        console.log('[Upload] Processing completed:', data)
 
         const result: UploadResult = {
           file: file.name,
@@ -267,6 +303,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         newResults.push(result)
         setResults([...newResults])
       } catch (err: unknown) {
+        console.error('[Upload] Error:', err)
         const errorMessage = err instanceof Error ? err.message : String(err)
         const result: UploadResult = {
           file: file.name,
@@ -278,6 +315,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
+    console.log('[Upload] All uploads finished')
     setIsUploading(false)
     setUploadStatus('')
     setProgress(null)
