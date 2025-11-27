@@ -103,6 +103,7 @@ async fn main() -> Result<()> {
 
     let public_routes = Router::new()
         .route("/videos/{id}/heartbeat", post(handlers::heartbeat))
+        .route("/videos/{id}/view", post(handlers::track_view))
         .route("/analytics/realtime", get(handlers::get_realtime_analytics))
         .route("/analytics/history", get(handlers::get_analytics_history))
         .route("/analytics/videos", get(handlers::get_analytics_videos))

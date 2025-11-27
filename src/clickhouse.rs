@@ -10,7 +10,7 @@ pub struct ViewRow {
     pub video_id: String,
     pub ip_address: String,
     pub user_agent: String,
-    pub created_at: i64, // Unix timestamp
+    pub created_at: u32, // DateTime in ClickHouse is stored as u32 Unix timestamp
 }
 
 pub fn initialize_client(config: &ClickHouseConfig) -> Client {
@@ -68,7 +68,7 @@ pub async fn insert_view(
         user_agent: user_agent.to_string(),
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs() as i64,
+            .as_secs() as u32,
     };
 
     let mut insert = client.insert("views")?;
@@ -95,11 +95,14 @@ pub async fn get_view_counts(
         return Ok(HashMap::new());
     }
 
-    // Use ClickHouse client's parameter binding for safer query execution
-    let query =
-        "SELECT video_id, count(*) as count FROM views WHERE video_id IN ? GROUP BY video_id";
+    // Build the IN clause with placeholders for each video_id
+    let placeholders: Vec<String> = video_ids.iter().map(|id| format!("'{}'", id.replace('\''  , "''"))).collect();
+    let query = format!(
+        "SELECT video_id, count(*) as count FROM views WHERE video_id IN ({}) GROUP BY video_id",
+        placeholders.join(", ")
+    );
 
-    let mut cursor = client.query(query).bind(video_ids).fetch::<ViewCount>()?;
+    let mut cursor = client.query(&query).fetch::<ViewCount>()?;
 
     let mut counts = HashMap::new();
 

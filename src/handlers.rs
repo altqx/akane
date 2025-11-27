@@ -918,7 +918,7 @@ pub async fn list_videos(
         page,
         page_size,
         &state.config.r2.public_base_url,
-        &HashMap::new(), // TODO: Fetch view counts if needed for list, or just pass empty for now as list usually doesn't show precise view counts or we can fetch them
+        &HashMap::new(), // View counts are fetched separately from ClickHouse below
     )
     .await
     .map_err(|e| internal_err(e))?;
@@ -1288,6 +1288,38 @@ pub async fn get_hls_file(
     Ok(([(header::CONTENT_TYPE, content_type)], body).into_response())
 }
 
+/// Track a view when video starts playing (called from player)
+pub async fn track_view(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(video_id): Path<String>,
+) -> StatusCode {
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| addr.ip().to_string());
+
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+
+    // Insert view into ClickHouse
+    match crate::clickhouse::insert_view(&state.clickhouse, &video_id, &ip, user_agent).await {
+        Ok(_) => {
+            info!("View tracked for video {} from {}", video_id, ip);
+            StatusCode::OK
+        }
+        Err(e) => {
+            error!("Failed to track view: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
 pub async fn get_player(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -1306,16 +1338,14 @@ pub async fn get_player(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // Increment view count on page load
-    // Note: This is a simple implementation. In production, you'd want to debounce this
-    // or use a more sophisticated method to prevent abuse.
-    let _ = crate::clickhouse::insert_view(&state.clickhouse, &id, &ip, user_agent).await;
-
-    // Generate token
+    // Generate token (view is now tracked on first play, not page load)
     let token = generate_token(&id, &state.config.server.secret_key, &ip, user_agent);
 
     let js_code = format!(
         r#"
+        let viewTracked = false;
+        let heartbeatStarted = false;
+
         async function init() {{
             const video = document.getElementById('video');
             const ui = video['ui'];
@@ -1336,15 +1366,32 @@ pub async fn get_player(
             window.ui = ui;
             player.addEventListener('error', onErrorEvent);
 
+            // Track view and start heartbeat on first play
+            video.addEventListener('play', onFirstPlay);
+
             try {{
                 await player.load('/hls/{}/index.m3u8');
-                startHeartbeat();
             }} catch (e) {{
                 onError(e);
             }}
         }}
 
+        function onFirstPlay() {{
+            if (!viewTracked) {{
+                viewTracked = true;
+                // Track the view
+                fetch('/api/videos/{}/view', {{ method: 'POST' }});
+            }}
+            if (!heartbeatStarted) {{
+                heartbeatStarted = true;
+                startHeartbeat();
+            }}
+        }}
+
         function startHeartbeat() {{
+            // Send initial heartbeat immediately
+            fetch('/api/videos/{}/heartbeat', {{ method: 'POST' }});
+            // Then continue every 10 seconds
             setInterval(() => {{
                 fetch('/api/videos/{}/heartbeat', {{ method: 'POST' }});
             }}, 10000);
@@ -1365,7 +1412,7 @@ pub async fn get_player(
             console.error('Unable to load the UI library!');
         }}
         "#,
-        id, id
+        id, id, id, id
     );
 
     let session = Session::new();
