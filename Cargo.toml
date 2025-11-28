@@ -27,3 +27,11 @@ hex = "0.4.3"
 minify-js = "0.6.0"
 async-stream = "0.3.6"
 clickhouse = { version = "0.14.1", features = [] }
+tokio-util = { version = "0.7.17", features = ["io"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
