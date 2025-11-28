@@ -83,29 +83,31 @@ pub async fn count_videos(db_pool: &SqlitePool, filters: &VideoQuery) -> Result<
                 .await?
         }
         (Some(name), None) => {
-            let pattern = format!("%{}%", name);
+            let safe_name = name.replace("\"", "");
+            let pattern = format!("name:\"{}\"*", safe_name);
             sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) as count FROM videos WHERE LOWER(name) LIKE ?",
+                "SELECT COUNT(*) as count FROM videos_fts WHERE videos_fts MATCH ?",
             )
             .bind(pattern)
             .fetch_one(db_pool)
             .await?
         }
         (None, Some(tag)) => {
-            let pattern = format!("%{}%", tag);
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) as count FROM videos WHERE tags LIKE ?")
+            let safe_tag = tag.replace("\"", "");
+            let pattern = format!("tags:\"{}\"", safe_tag);
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) as count FROM videos_fts WHERE videos_fts MATCH ?")
                 .bind(pattern)
                 .fetch_one(db_pool)
                 .await?
         }
         (Some(name), Some(tag)) => {
-            let name_pattern = format!("%{}%", name);
-            let tag_pattern = format!("%{}%", tag);
+            let safe_name = name.replace("\"", "");
+            let safe_tag = tag.replace("\"", "");
+            let pattern = format!("name:\"{}\"* AND tags:\"{}\"", safe_name, safe_tag);
             sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) as count FROM videos WHERE LOWER(name) LIKE ? AND tags LIKE ?",
+                "SELECT COUNT(*) as count FROM videos_fts WHERE videos_fts MATCH ?",
             )
-            .bind(name_pattern)
-            .bind(tag_pattern)
+            .bind(pattern)
             .fetch_one(db_pool)
             .await?
         }
@@ -145,12 +147,14 @@ pub async fn list_videos(
              .await?
          }
          (Some(name), None) => {
-             let pattern = format!("%{}%", name);
+             let safe_name = name.replace("\"", "");
+             let pattern = format!("name:\"{}\"*", safe_name);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
-                  FROM videos \
-                  WHERE LOWER(name) LIKE ? \
-                  ORDER BY datetime(created_at) DESC \
+                 "SELECT v.id, v.name, v.tags, v.available_resolutions, v.duration, v.thumbnail_key, v.entrypoint, v.created_at \
+                  FROM videos v \
+                  JOIN videos_fts f ON v.id = f.id \
+                  WHERE f.videos_fts MATCH ? \
+                  ORDER BY datetime(v.created_at) DESC \
                   LIMIT ? OFFSET ?",
              )
              .bind(pattern)
@@ -160,12 +164,14 @@ pub async fn list_videos(
              .await?
          }
          (None, Some(tag)) => {
-             let pattern = format!("%{}%", tag);
+             let safe_tag = tag.replace("\"", "");
+             let pattern = format!("tags:\"{}\"", safe_tag);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
-                  FROM videos \
-                  WHERE tags LIKE ? \
-                  ORDER BY datetime(created_at) DESC \
+                 "SELECT v.id, v.name, v.tags, v.available_resolutions, v.duration, v.thumbnail_key, v.entrypoint, v.created_at \
+                  FROM videos v \
+                  JOIN videos_fts f ON v.id = f.id \
+                  WHERE f.videos_fts MATCH ? \
+                  ORDER BY datetime(v.created_at) DESC \
                   LIMIT ? OFFSET ?",
              )
              .bind(pattern)
@@ -175,17 +181,18 @@ pub async fn list_videos(
              .await?
          }
          (Some(name), Some(tag)) => {
-             let name_pattern = format!("%{}%", name);
-             let tag_pattern = format!("%{}%", tag);
+             let safe_name = name.replace("\"", "");
+             let safe_tag = tag.replace("\"", "");
+             let pattern = format!("name:\"{}\"* AND tags:\"{}\"", safe_name, safe_tag);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
-                  FROM videos \
-                  WHERE LOWER(name) LIKE ? AND tags LIKE ? \
-                  ORDER BY datetime(created_at) DESC \
+                 "SELECT v.id, v.name, v.tags, v.available_resolutions, v.duration, v.thumbnail_key, v.entrypoint, v.created_at \
+                  FROM videos v \
+                  JOIN videos_fts f ON v.id = f.id \
+                  WHERE f.videos_fts MATCH ? \
+                  ORDER BY datetime(v.created_at) DESC \
                   LIMIT ? OFFSET ?",
              )
-             .bind(name_pattern)
-             .bind(tag_pattern)
+             .bind(pattern)
              .bind(limit)
              .bind(offset)
              .fetch_all(db_pool)
@@ -236,12 +243,20 @@ pub struct VideoSummary {
 pub async fn get_all_videos_summary(
     db_pool: &SqlitePool,
     view_counts: &HashMap<String, i64>,
+    limit: Option<i64>,
 ) -> Result<Vec<VideoSummary>> {
-    let rows = sqlx::query_as::<_, VideoSummary>(
+    let query = if let Some(l) = limit {
+        format!("SELECT id, name, created_at, thumbnail_key \
+         FROM videos \
+         ORDER BY datetime(created_at) DESC \
+         LIMIT {}", l)
+    } else {
         "SELECT id, name, created_at, thumbnail_key \
          FROM videos \
-         ORDER BY datetime(created_at) DESC",
-    )
+         ORDER BY datetime(created_at) DESC".to_string()
+    };
+
+    let rows = sqlx::query_as::<_, VideoSummary>(&query)
     .fetch_all(db_pool)
     .await?;
 
@@ -258,13 +273,3 @@ pub async fn get_all_videos_summary(
 
     Ok(rows)
 }
-
-/*
-pub async fn clear_database(db_pool: &SqlitePool) -> Result<()> {
-    let mut tx = db_pool.begin().await?;
-    sqlx::query("DELETE FROM views").execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM videos").execute(&mut *tx).await?;
-    tx.commit().await?;
-    Ok(())
-}
-*/

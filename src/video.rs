@@ -7,54 +7,46 @@ use tokio::sync::Semaphore;
 use tokio::{fs, process::Command};
 use tracing::{error, info};
 
-pub async fn get_video_height(input: &PathBuf) -> Result<u32> {
+pub async fn get_video_metadata(input: &PathBuf) -> Result<(u32, u32)> {
+    // Using JSON output
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
         .arg("-select_streams")
         .arg("v:0")
         .arg("-show_entries")
-        .arg("stream=height")
+        .arg("stream=height:format=duration")
         .arg("-of")
-        .arg("csv=p=0")
+        .arg("json")
         .arg(input)
         .output()
         .await
         .context("failed to run ffprobe")?;
-
+        
     if !output.status.success() {
-        anyhow::bail!("ffprobe failed to get video height");
+        anyhow::bail!("ffprobe failed");
     }
+    
+    let json_str = String::from_utf8(output.stdout)?;
+    let v: serde_json::Value = serde_json::from_str(&json_str)?;
+    
+    let height = v["streams"][0]["height"].as_u64().context("no height found")? as u32;
+    let duration_str = v["format"]["duration"].as_str().context("no duration found")?;
+    let duration: f64 = duration_str.parse()?;
+    
+    Ok((height, duration.round() as u32))
+}
 
-    let height_str = String::from_utf8(output.stdout)?.trim().to_string();
-    let height: u32 = height_str.parse().context("failed to parse video height")?;
-
-    Ok(height)
+pub async fn get_video_height(input: &PathBuf) -> Result<u32> {
+    // Keep for backward compatibility or individual usage
+    let (h, _) = get_video_metadata(input).await?;
+    Ok(h)
 }
 
 pub async fn get_video_duration(input: &PathBuf) -> Result<u32> {
-    let output = Command::new("ffprobe")
-        .arg("-v")
-        .arg("error")
-        .arg("-show_entries")
-        .arg("format=duration")
-        .arg("-of")
-        .arg("csv=p=0")
-        .arg(input)
-        .output()
-        .await
-        .context("failed to run ffprobe")?;
-
-    if !output.status.success() {
-        anyhow::bail!("ffprobe failed to get video duration");
-    }
-
-    let duration_str = String::from_utf8(output.stdout)?.trim().to_string();
-    let duration: f64 = duration_str
-        .parse()
-        .context("failed to parse video duration")?;
-
-    Ok(duration.round() as u32)
+     // Keep for backward compatibility or individual usage
+    let (_, d) = get_video_metadata(input).await?;
+    Ok(d)
 }
 
 pub fn get_variants_for_height(original_height: u32) -> Vec<VideoVariant> {
@@ -121,7 +113,7 @@ pub async fn encode_to_hls(
     fs::create_dir_all(out_dir).await?;
 
     // Get original video height to determine appropriate variants
-    let original_height = get_video_height(input).await?;
+    let (original_height, _) = get_video_metadata(input).await?;
     let variants = get_variants_for_height(original_height);
 
     if variants.is_empty() {
@@ -243,7 +235,7 @@ pub async fn encode_to_hls(
             match encoder_type {
                 EncoderType::Nvenc => {
                     cmd.arg("-preset")
-                        .arg("p4") // Medium preset
+                        .arg("p3")
                         .arg("-profile:v")
                         .arg("main")
                         .arg("-level:v")
@@ -275,7 +267,7 @@ pub async fn encode_to_hls(
                 }
                 EncoderType::Qsv => {
                     cmd.arg("-preset")
-                        .arg("medium")
+                        .arg("faster")
                         .arg("-profile:v")
                         .arg("main")
                         .arg("-look_ahead")

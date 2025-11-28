@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use crate::clickhouse;
 use crate::database::{
     /*clear_database,*/ count_videos, list_videos as db_list_videos, save_video,
@@ -18,6 +19,7 @@ use axum::{
         Html, IntoResponse, Response,
         sse::{Event, Sse},
     },
+    body::Body,
 };
 use futures::stream::Stream;
 use minify_js::{Session, TopLevelMode, minify};
@@ -1039,9 +1041,7 @@ pub struct AnalyticsVideoDto {
 pub async fn get_analytics_videos(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AnalyticsVideoDto>>, (StatusCode, String)> {
-    // First get all video IDs to fetch counts
-    // We fetch summary from DB and then enrich with CH data
-    let mut videos = crate::database::get_all_videos_summary(&state.db_pool, &HashMap::new())
+    let mut videos = crate::database::get_all_videos_summary(&state.db_pool, &HashMap::new(), Some(100))
         .await
         .map_err(|e| internal_err(e))?;
 
@@ -1261,16 +1261,19 @@ pub async fn get_hls_file(
         .send()
         .await
         .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
-
-    // Load content into memory (simplifies type handling for ByteStream)
-    let body_bytes = content
-        .body
-        .collect()
-        .await
-        .map_err(|e| internal_err(anyhow::anyhow!(e)))?
-        .into_bytes();
-
-    let body = axum::body::Body::from(body_bytes);
+    
+    // Stream the body directly instead of collecting into memory
+    let reader = content.body.into_async_read();
+    let stream = tokio_util::io::ReaderStream::new(reader);
+    
+    // Convert Byte stream to Frame stream for Axum Body
+    let body_stream = stream.map(|result| {
+        result
+            .map(|bytes| axum::body::Bytes::from(bytes)) // Ensure it's Bytes
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    });
+    
+    let body = Body::from_stream(body_stream);
 
     // Determine Content-Type
     let content_type = if file.ends_with(".m3u8") {
