@@ -22,18 +22,22 @@ pub async fn get_video_metadata(input: &PathBuf) -> Result<(u32, u32)> {
         .output()
         .await
         .context("failed to run ffprobe")?;
-        
+
     if !output.status.success() {
         anyhow::bail!("ffprobe failed");
     }
-    
+
     let json_str = String::from_utf8(output.stdout)?;
     let v: serde_json::Value = serde_json::from_str(&json_str)?;
-    
-    let height = v["streams"][0]["height"].as_u64().context("no height found")? as u32;
-    let duration_str = v["format"]["duration"].as_str().context("no duration found")?;
+
+    let height = v["streams"][0]["height"]
+        .as_u64()
+        .context("no height found")? as u32;
+    let duration_str = v["format"]["duration"]
+        .as_str()
+        .context("no duration found")?;
     let duration: f64 = duration_str.parse()?;
-    
+
     Ok((height, duration.round() as u32))
 }
 
@@ -44,7 +48,7 @@ pub async fn get_video_height(input: &PathBuf) -> Result<u32> {
 }
 
 pub async fn get_video_duration(input: &PathBuf) -> Result<u32> {
-     // Keep for backward compatibility or individual usage
+    // Keep for backward compatibility or individual usage
     let (_, d) = get_video_metadata(input).await?;
     Ok(d)
 }
@@ -162,11 +166,12 @@ pub async fn encode_to_hls(
             let current_chunk = (index + 1) as u32;
             let percentage = (((current_chunk as f32) / (total_variants as f32)) * 100.0) as u32;
             // Preserve video_name from existing progress
-            let existing_video_name = {
+            let (existing_video_name, existing_created_at) = {
                 let progress_map = progress.read().await;
                 progress_map
                     .get(&upload_id)
-                    .and_then(|p| p.video_name.clone())
+                    .map(|p| (p.video_name.clone(), p.created_at))
+                    .unwrap_or((None, 0))
             };
             let start_progress = ProgressUpdate {
                 stage: "FFmpeg processing".to_string(),
@@ -181,6 +186,7 @@ pub async fn encode_to_hls(
                 result: None,
                 error: None,
                 video_name: existing_video_name.clone(),
+                created_at: existing_created_at,
             };
             progress
                 .write()
@@ -386,6 +392,7 @@ pub async fn encode_to_hls(
                 result: None,
                 error: None,
                 video_name: existing_video_name,
+                created_at: existing_created_at,
             };
             progress
                 .write()

@@ -1,35 +1,54 @@
-use futures::StreamExt;
 use crate::clickhouse;
 use crate::database::{
     /*clear_database,*/ count_videos, list_videos as db_list_videos, save_video,
+    update_video as db_update_video,
 };
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
-    AppState, ChunkUploadResponse, ChunkedUpload, FinalizeUploadRequest, ProgressResponse,
-    ProgressUpdate, QueueItem, QueueListResponse, UploadAccepted, UploadResponse,
+    AppState, ChunkUploadResponse, ChunkedUpload, FinalizeUploadRequest, ProgressMap,
+    ProgressResponse, ProgressUpdate, QueueItem, QueueListResponse, UploadAccepted, UploadResponse,
     VideoListResponse, VideoQuery,
 };
 use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, get_video_height};
+use futures::StreamExt;
 // use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use axum::{
     Json,
+    body::Body,
     extract::{ConnectInfo, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{
         Html, IntoResponse, Response,
         sse::{Event, Sse},
     },
-    body::Body,
 };
 use futures::stream::Stream;
 use minify_js::{Session, TopLevelMode, minify};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{fs, io::AsyncReadExt, io::AsyncWriteExt};
 use tracing::{error, info};
 use uuid::Uuid;
+
+/// Get current timestamp in milliseconds
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Helper to update progress while preserving the original created_at timestamp
+async fn update_progress(progress_map: &ProgressMap, upload_id: &str, mut update: ProgressUpdate) {
+    let mut map = progress_map.write().await;
+    // Preserve the original created_at if the entry exists
+    if let Some(existing) = map.get(upload_id) {
+        update.created_at = existing.created_at;
+    }
+    map.insert(upload_id.to_string(), update);
+}
 
 pub async fn upload_video(
     State(state): State<AppState>,
@@ -59,6 +78,7 @@ pub async fn upload_video(
             result: None,
             error: None,
             video_name: None,
+            created_at: now_millis(),
         };
         state
             .progress
@@ -111,12 +131,9 @@ pub async fn upload_video(
                             result: None,
                             error: None,
                             video_name: None,
+                            created_at: 0, // Will be set by update_progress
                         };
-                        state
-                            .progress
-                            .write()
-                            .await
-                            .insert(upload_id.clone(), progress_update);
+                        update_progress(&state.progress, &upload_id, progress_update).await;
                     }
                 }
 
@@ -176,12 +193,9 @@ pub async fn upload_video(
         result: None,
         error: None,
         video_name: Some(video_name.clone()),
+        created_at: 0, // Will be set by update_progress
     };
-    state
-        .progress
-        .write()
-        .await
-        .insert(upload_id.clone(), initial_progress);
+    update_progress(&state.progress, &upload_id, initial_progress).await;
 
     // Spawn background task for processing
     let state_clone = state.clone();
@@ -221,12 +235,9 @@ pub async fn upload_video(
                 result: None,
                 error: None,
                 video_name: Some(video_name_clone.clone()),
+                created_at: 0, // Will be set by update_progress
             };
-            state_clone
-                .progress
-                .write()
-                .await
-                .insert(upload_id_clone.clone(), encoding_progress);
+            update_progress(&state_clone.progress, &upload_id_clone, encoding_progress).await;
 
             encode_to_hls(
                 &video_path_clone,
@@ -249,12 +260,9 @@ pub async fn upload_video(
                 result: None,
                 error: None,
                 video_name: Some(video_name_clone.clone()),
+                created_at: 0, // Will be set by update_progress
             };
-            state_clone
-                .progress
-                .write()
-                .await
-                .insert(upload_id_clone.clone(), upload_progress);
+            update_progress(&state_clone.progress, &upload_id_clone, upload_progress).await;
 
             // Upload HLS to R2
             let prefix = format!("{}/", output_id);
@@ -303,12 +311,9 @@ pub async fn upload_video(
                     result: Some(response),
                     error: None,
                     video_name: Some(video_name_clone.clone()),
+                    created_at: 0,
                 };
-                state_clone
-                    .progress
-                    .write()
-                    .await
-                    .insert(upload_id_clone.clone(), completion_progress);
+                update_progress(&state_clone.progress, &upload_id_clone, completion_progress).await;
             }
             Err(e) => {
                 error!("Background processing failed: {:?}", e);
@@ -322,12 +327,9 @@ pub async fn upload_video(
                     result: None,
                     error: Some(e.to_string()),
                     video_name: Some(video_name_clone.clone()),
+                    created_at: 0,
                 };
-                state_clone
-                    .progress
-                    .write()
-                    .await
-                    .insert(upload_id_clone.clone(), error_progress);
+                update_progress(&state_clone.progress, &upload_id_clone, error_progress).await;
             }
         }
 
@@ -466,6 +468,7 @@ pub async fn upload_chunk(
                 result: None,
                 error: None,
                 video_name: Some(file_name.replace(&['.'][..], "_")),
+                created_at: now_millis(),
             };
             state
                 .progress
@@ -513,12 +516,9 @@ pub async fn upload_chunk(
         result: None,
         error: None,
         video_name: Some(file_name.replace(&['.'][..], "_")),
+        created_at: 0, // Will be set by update_progress
     };
-    state
-        .progress
-        .write()
-        .await
-        .insert(upload_id.clone(), progress);
+    update_progress(&state.progress, &upload_id, progress).await;
 
     Ok(Json(ChunkUploadResponse {
         upload_id,
@@ -576,12 +576,9 @@ pub async fn finalize_chunked_upload(
         result: None,
         error: None,
         video_name: Some(body.name.clone()),
+        created_at: 0, // Will be set by update_progress
     };
-    state
-        .progress
-        .write()
-        .await
-        .insert(upload_id.clone(), progress);
+    update_progress(&state.progress, &upload_id, progress).await;
 
     // Assemble chunks into final file
     let final_path =
@@ -635,12 +632,9 @@ pub async fn finalize_chunked_upload(
         result: None,
         error: None,
         video_name: Some(video_name.clone()),
+        created_at: 0, // Will be set by update_progress
     };
-    state
-        .progress
-        .write()
-        .await
-        .insert(upload_id.clone(), progress);
+    update_progress(&state.progress, &upload_id, progress).await;
 
     // Spawn background task for processing (same as regular upload)
     let state_clone = state.clone();
@@ -677,12 +671,9 @@ pub async fn finalize_chunked_upload(
                 result: None,
                 error: None,
                 video_name: Some(video_name_clone.clone()),
+                created_at: 0,
             };
-            state_clone
-                .progress
-                .write()
-                .await
-                .insert(upload_id_clone.clone(), encoding_progress);
+            update_progress(&state_clone.progress, &upload_id_clone, encoding_progress).await;
 
             encode_to_hls(
                 &video_path_clone,
@@ -704,12 +695,9 @@ pub async fn finalize_chunked_upload(
                 result: None,
                 error: None,
                 video_name: Some(video_name_clone.clone()),
+                created_at: 0,
             };
-            state_clone
-                .progress
-                .write()
-                .await
-                .insert(upload_id_clone.clone(), upload_progress);
+            update_progress(&state_clone.progress, &upload_id_clone, upload_progress).await;
 
             let prefix = format!("{}/", output_id);
             let playlist_key =
@@ -753,12 +741,9 @@ pub async fn finalize_chunked_upload(
                     result: Some(response),
                     error: None,
                     video_name: Some(video_name_clone.clone()),
+                    created_at: 0,
                 };
-                state_clone
-                    .progress
-                    .write()
-                    .await
-                    .insert(upload_id_clone.clone(), completion_progress);
+                update_progress(&state_clone.progress, &upload_id_clone, completion_progress).await;
             }
             Err(e) => {
                 error!("Background processing failed: {:?}", e);
@@ -772,12 +757,9 @@ pub async fn finalize_chunked_upload(
                     result: None,
                     error: Some(e.to_string()),
                     video_name: Some(video_name_clone.clone()),
+                    created_at: 0,
                 };
-                state_clone
-                    .progress
-                    .write()
-                    .await
-                    .insert(upload_id_clone.clone(), error_progress);
+                update_progress(&state_clone.progress, &upload_id_clone, error_progress).await;
             }
         }
 
@@ -800,7 +782,7 @@ pub async fn finalize_chunked_upload(
 pub async fn list_queues(State(state): State<AppState>) -> Json<QueueListResponse> {
     let progress_map = state.progress.read().await;
 
-    let items: Vec<QueueItem> = progress_map
+    let mut items: Vec<QueueItem> = progress_map
         .iter()
         .map(|(id, p)| QueueItem {
             upload_id: id.clone(),
@@ -811,8 +793,12 @@ pub async fn list_queues(State(state): State<AppState>) -> Json<QueueListRespons
             details: p.details.clone(),
             status: p.status.clone(),
             video_name: p.video_name.clone(),
+            created_at: p.created_at,
         })
         .collect();
+
+    // Sort by created_at to maintain consistent queue order (oldest first)
+    items.sort_by_key(|item| item.created_at);
 
     let active_count = items
         .iter()
@@ -1041,9 +1027,10 @@ pub struct AnalyticsVideoDto {
 pub async fn get_analytics_videos(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AnalyticsVideoDto>>, (StatusCode, String)> {
-    let mut videos = crate::database::get_all_videos_summary(&state.db_pool, &HashMap::new(), Some(100))
-        .await
-        .map_err(|e| internal_err(e))?;
+    let mut videos =
+        crate::database::get_all_videos_summary(&state.db_pool, &HashMap::new(), Some(100))
+            .await
+            .map_err(|e| internal_err(e))?;
 
     let video_ids: Vec<String> = videos.iter().map(|v| v.id.clone()).collect();
     let view_counts = clickhouse::get_view_counts(&state.clickhouse, &video_ids)
@@ -1070,6 +1057,30 @@ pub async fn get_analytics_videos(
         .collect();
 
     Ok(Json(dtos))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateVideoRequest {
+    pub name: String,
+    pub tags: Vec<String>,
+}
+
+pub async fn update_video(
+    State(state): State<AppState>,
+    Path(video_id): Path<String>,
+    Json(body): Json<UpdateVideoRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    db_update_video(&state.db_pool, &video_id, &body.name, &body.tags)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("Video not found") {
+                (StatusCode::NOT_FOUND, "Video not found".to_string())
+            } else {
+                internal_err(e)
+            }
+        })?;
+
+    Ok(StatusCode::OK)
 }
 /*
 pub async fn purge_bucket(
@@ -1141,7 +1152,6 @@ fn internal_err(e: anyhow::Error) -> (axum::http::StatusCode, String) {
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // Helper to generate a signed token
 fn generate_token(video_id: &str, secret: &str, ip: &str, user_agent: &str) -> String {
@@ -1261,18 +1271,18 @@ pub async fn get_hls_file(
         .send()
         .await
         .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
-    
+
     // Stream the body directly instead of collecting into memory
     let reader = content.body.into_async_read();
     let stream = tokio_util::io::ReaderStream::new(reader);
-    
+
     // Convert Byte stream to Frame stream for Axum Body
     let body_stream = stream.map(|result| {
         result
             .map(|bytes| axum::body::Bytes::from(bytes)) // Ensure it's Bytes
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     });
-    
+
     let body = Body::from_stream(body_stream);
 
     // Determine Content-Type

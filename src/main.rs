@@ -16,7 +16,7 @@ use axum::{
     middleware::{self, Next},
     response::Redirect,
     response::Response,
-    routing::{/*delete,*/ get, post},
+    routing::{/*delete,*/ get, post, put},
 };
 use config::Config;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
@@ -114,6 +114,7 @@ async fn main() -> Result<()> {
         .route("/upload/chunk", post(handlers::upload_chunk))
         .route("/upload/finalize", post(handlers::finalize_chunked_upload))
         .route("/videos", get(handlers::list_videos))
+        .route("/videos/{id}", put(handlers::update_video))
         .route("/queues", get(handlers::list_queues))
         .route("/auth/check", get(check_auth))
         //.route("/purge", delete(handlers::purge_bucket))

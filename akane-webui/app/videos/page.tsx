@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback } from 'react'
 import Navbar from '@/components/Navbar'
 import Button from '@/components/Button'
 import Input from '@/components/Input'
+import VideoPreviewModal from '@/components/VideoPreviewModal'
+import VideoEditModal from '@/components/VideoEditModal'
 
 interface Video {
   id: string
@@ -44,6 +46,10 @@ export default function Videos() {
   const [hasPrev, setHasPrev] = useState(false)
 
   const [copiedId, setCopiedId] = useState<string | null>(null)
+
+  // Modal state
+  const [previewVideo, setPreviewVideo] = useState<Video | null>(null)
+  const [editVideo, setEditVideo] = useState<Video | null>(null)
 
   const loadVideos = useCallback(async () => {
     setLoading(true)
@@ -113,6 +119,28 @@ export default function Videos() {
     } catch (err) {
       console.error('Failed to copy:', err)
     }
+  }
+
+  const handleSaveVideo = async (id: string, name: string, tags: string[]) => {
+    const token = localStorage.getItem('admin_token')
+    const res = await fetch(`/api/videos/${id}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({ name, tags })
+    })
+
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(text || 'Failed to update video')
+    }
+
+    // Update local state
+    setVideos((prev) =>
+      prev.map((v) => (v.id === id ? { ...v, name, tags } : v))
+    )
   }
 
   return (
@@ -260,6 +288,31 @@ export default function Videos() {
                     <td className='text-right'>
                       <div className='flex justify-end gap-2'>
                         {video.player_url && (
+                          <Button
+                            size='sm'
+                            variant='ghost'
+                            onClick={() => setPreviewVideo(video)}
+                            className='btn-xs'
+                            title='Preview video'
+                          >
+                            <svg xmlns='http://www.w3.org/2000/svg' className='h-4 w-4' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
+                              <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z' />
+                              <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M21 12a9 9 0 11-18 0 9 9 0 0118 0z' />
+                            </svg>
+                          </Button>
+                        )}
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          onClick={() => setEditVideo(video)}
+                          className='btn-xs'
+                          title='Edit video'
+                        >
+                          <svg xmlns='http://www.w3.org/2000/svg' className='h-4 w-4' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
+                            <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z' />
+                          </svg>
+                        </Button>
+                        {video.player_url && (
                           <Button size='sm' variant='secondary' onClick={() => copyEmbedCode(video)} className='btn-xs'>
                             {copiedId === video.id ? 'Copied!' : 'Copy Embed'}
                           </Button>
@@ -311,6 +364,22 @@ export default function Videos() {
           </div>
         </div>
       </div>
+
+      {/* Video Preview Modal */}
+      <VideoPreviewModal
+        isOpen={!!previewVideo}
+        onClose={() => setPreviewVideo(null)}
+        playerUrl={previewVideo?.player_url || ''}
+        videoName={previewVideo?.name || ''}
+      />
+
+      {/* Video Edit Modal */}
+      <VideoEditModal
+        isOpen={!!editVideo}
+        onClose={() => setEditVideo(null)}
+        video={editVideo}
+        onSave={handleSaveVideo}
+      />
     </div>
   )
 }

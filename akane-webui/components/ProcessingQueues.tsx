@@ -11,6 +11,7 @@ interface QueueItem {
   details: string | null
   status: string
   video_name: string | null
+  created_at: number // Unix timestamp in milliseconds for queue ordering
 }
 
 interface QueueListResponse {

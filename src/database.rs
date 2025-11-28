@@ -240,6 +240,36 @@ pub struct VideoSummary {
     pub thumbnail_key: String,
 }
 
+pub async fn update_video(
+    db_pool: &SqlitePool,
+    video_id: &str,
+    name: &str,
+    tags: &[String],
+) -> Result<()> {
+    let tags_json = serde_json::to_string(tags)?;
+
+    let rows_affected = sqlx::query(
+        "UPDATE videos SET name = ?, tags = ? WHERE id = ?",
+    )
+    .bind(name)
+    .bind(&tags_json)
+    .bind(video_id)
+    .execute(db_pool)
+    .await?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        anyhow::bail!("Video not found");
+    }
+
+    info!(
+        "Video updated in database: id={}, name={}",
+        video_id, name
+    );
+
+    Ok(())
+}
+
 pub async fn get_all_videos_summary(
     db_pool: &SqlitePool,
     view_counts: &HashMap<String, i64>,

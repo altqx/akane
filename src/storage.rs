@@ -89,10 +89,13 @@ pub async fn upload_hls_to_r2(
                 let current = uploaded_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(id) = upload_id {
                     let percentage = ((current as f32 / total_files as f32) * 100.0) as u32;
-                    // Preserve video_name from existing progress
-                    let existing_video_name = {
+                    // Preserve video_name and created_at from existing progress
+                    let (existing_video_name, existing_created_at) = {
                         let progress_map = state.progress.read().await;
-                        progress_map.get(&id).and_then(|p| p.video_name.clone())
+                        progress_map
+                            .get(&id)
+                            .map(|p| (p.video_name.clone(), p.created_at))
+                            .unwrap_or((None, 0))
                     };
                     let progress_update = ProgressUpdate {
                         stage: "Upload to R2".to_string(),
@@ -104,6 +107,7 @@ pub async fn upload_hls_to_r2(
                         result: None,
                         error: None,
                         video_name: existing_video_name,
+                        created_at: existing_created_at,
                     };
                     state.progress.write().await.insert(id, progress_update);
                 }

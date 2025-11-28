@@ -18,6 +18,7 @@ pub struct ProgressUpdate {
     pub result: Option<UploadResponse>,
     pub error: Option<String>,
     pub video_name: Option<String>,
+    pub created_at: u64, // Unix timestamp in milliseconds for queue ordering
 }
 
 pub type ProgressMap = Arc<RwLock<HashMap<String, ProgressUpdate>>>;
@@ -106,6 +107,7 @@ pub struct QueueItem {
     pub details: Option<String>,
     pub status: String,
     pub video_name: Option<String>,
+    pub created_at: u64, // Unix timestamp in milliseconds for queue ordering
 }
 
 #[derive(Serialize)]
