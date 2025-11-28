@@ -270,6 +270,52 @@ pub async fn update_video(
     Ok(())
 }
 
+pub async fn delete_videos(db_pool: &SqlitePool, video_ids: &[String]) -> Result<u64> {
+    if video_ids.is_empty() {
+        return Ok(0);
+    }
+
+    // Build placeholders for the IN clause
+    let placeholders: Vec<&str> = video_ids.iter().map(|_| "?").collect();
+    let query = format!(
+        "DELETE FROM videos WHERE id IN ({})",
+        placeholders.join(", ")
+    );
+
+    let mut query_builder = sqlx::query(&query);
+    for id in video_ids {
+        query_builder = query_builder.bind(id);
+    }
+
+    let result = query_builder.execute(db_pool).await?;
+    let deleted = result.rows_affected();
+
+    info!("Deleted {} videos from database", deleted);
+
+    Ok(deleted)
+}
+
+pub async fn get_video_ids_with_prefix(db_pool: &SqlitePool, video_ids: &[String]) -> Result<Vec<String>> {
+    if video_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Build placeholders for the IN clause
+    let placeholders: Vec<&str> = video_ids.iter().map(|_| "?").collect();
+    let query = format!(
+        "SELECT id FROM videos WHERE id IN ({})",
+        placeholders.join(", ")
+    );
+
+    let mut query_builder = sqlx::query_scalar::<_, String>(&query);
+    for id in video_ids {
+        query_builder = query_builder.bind(id);
+    }
+
+    let ids = query_builder.fetch_all(db_pool).await?;
+    Ok(ids)
+}
+
 pub async fn get_all_videos_summary(
     db_pool: &SqlitePool,
     view_counts: &HashMap<String, i64>,

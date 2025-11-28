@@ -1,6 +1,7 @@
 use crate::clickhouse;
 use crate::database::{
-    /*clear_database,*/ count_videos, list_videos as db_list_videos, save_video,
+    /*clear_database,*/ count_videos, delete_videos as db_delete_videos,
+    get_video_ids_with_prefix, list_videos as db_list_videos, save_video,
     update_video as db_update_video,
 };
 use crate::storage::upload_hls_to_r2;
@@ -815,6 +816,71 @@ pub async fn list_queues(State(state): State<AppState>) -> Json<QueueListRespons
     })
 }
 
+#[derive(serde::Serialize)]
+pub struct CancelQueueResponse {
+    pub cancelled: bool,
+    pub message: String,
+}
+
+pub async fn cancel_queue(
+    State(state): State<AppState>,
+    Path(upload_id): Path<String>,
+) -> Result<Json<CancelQueueResponse>, (StatusCode, String)> {
+    info!("Attempting to cancel queue: {}", upload_id);
+
+    // Check if the queue item exists and is in a cancellable state
+    let mut progress_map = state.progress.write().await;
+
+    if let Some(progress) = progress_map.get(&upload_id) {
+        // Only allow cancellation of items that are "initializing" or in early "processing" stages
+        // We cannot cancel items that are actively being encoded by FFmpeg
+        let cancellable_stages = ["Initializing upload", "Queued for processing", "Receiving chunks"];
+        let is_cancellable = progress.status == "initializing"
+            || (progress.status == "processing" && cancellable_stages.contains(&progress.stage.as_str()));
+
+        if !is_cancellable {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "Cannot cancel: video is already being processed (stage: {})",
+                    progress.stage
+                ),
+            ));
+        }
+
+        // Mark as cancelled (we'll use "failed" status with a specific message)
+        let cancelled_progress = ProgressUpdate {
+            stage: "Cancelled".to_string(),
+            current_chunk: 0,
+            total_chunks: progress.total_chunks,
+            percentage: 0,
+            details: Some("Cancelled by user".to_string()),
+            status: "failed".to_string(),
+            result: None,
+            error: Some("Cancelled by user".to_string()),
+            video_name: progress.video_name.clone(),
+            created_at: progress.created_at,
+        };
+        progress_map.insert(upload_id.clone(), cancelled_progress);
+
+        // Also clean up any chunked upload data if it exists
+        drop(progress_map); // Release the lock before acquiring another
+        let mut chunked_uploads = state.chunked_uploads.write().await;
+        if let Some(chunked) = chunked_uploads.remove(&upload_id) {
+            // Clean up temp directory
+            let _ = fs::remove_dir_all(&chunked.temp_dir).await;
+            info!("Cleaned up chunked upload temp files for {}", upload_id);
+        }
+
+        Ok(Json(CancelQueueResponse {
+            cancelled: true,
+            message: "Queue item cancelled successfully".to_string(),
+        }))
+    } else {
+        Err((StatusCode::NOT_FOUND, "Queue item not found".to_string()))
+    }
+}
+
 pub async fn get_progress(
     State(state): State<AppState>,
     Path(upload_id): Path<String>,
@@ -1063,6 +1129,91 @@ pub async fn get_analytics_videos(
 pub struct UpdateVideoRequest {
     pub name: String,
     pub tags: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct DeleteVideosRequest {
+    pub ids: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct DeleteVideosResponse {
+    pub deleted: u64,
+    pub message: String,
+}
+
+pub async fn delete_videos(
+    State(state): State<AppState>,
+    Json(body): Json<DeleteVideosRequest>,
+) -> Result<Json<DeleteVideosResponse>, (StatusCode, String)> {
+    if body.ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No video IDs provided".to_string(),
+        ));
+    }
+
+    info!("Deleting {} videos: {:?}", body.ids.len(), body.ids);
+
+    // First, verify videos exist and get their IDs (also acts as validation)
+    let existing_ids = get_video_ids_with_prefix(&state.db_pool, &body.ids)
+        .await
+        .map_err(|e| internal_err(e))?;
+
+    if existing_ids.is_empty() {
+        return Err((StatusCode::NOT_FOUND, "No videos found".to_string()));
+    }
+
+    // Delete from R2 storage (each video has a folder with its ID as prefix)
+    for video_id in &existing_ids {
+        let prefix = format!("{}/", video_id);
+
+        // List all objects with this prefix
+        let mut continuation_token: Option<String> = None;
+        loop {
+            let list_resp = state
+                .s3
+                .list_objects_v2()
+                .bucket(&state.config.r2.bucket)
+                .prefix(&prefix)
+                .set_continuation_token(continuation_token.clone())
+                .send()
+                .await
+                .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+            if let Some(contents) = list_resp.contents {
+                for obj in contents {
+                    if let Some(key) = obj.key {
+                        state
+                            .s3
+                            .delete_object()
+                            .bucket(&state.config.r2.bucket)
+                            .key(&key)
+                            .send()
+                            .await
+                            .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+                        info!("Deleted from R2: {}", key);
+                    }
+                }
+            }
+
+            if list_resp.is_truncated.unwrap_or(false) {
+                continuation_token = list_resp.next_continuation_token;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Delete from database
+    let deleted = db_delete_videos(&state.db_pool, &existing_ids)
+        .await
+        .map_err(|e| internal_err(e))?;
+
+    Ok(Json(DeleteVideosResponse {
+        deleted,
+        message: format!("Successfully deleted {} video(s)", deleted),
+    }))
 }
 
 pub async fn update_video(

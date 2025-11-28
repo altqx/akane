@@ -26,6 +26,7 @@ export default function ProcessingQueues() {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set())
 
   const fetchQueues = useCallback(async () => {
     try {
@@ -55,6 +56,44 @@ export default function ProcessingQueues() {
     const interval = setInterval(fetchQueues, 2000) // Poll every 2 seconds
     return () => clearInterval(interval)
   }, [fetchQueues])
+
+  const isCancellable = (item: QueueItem) => {
+    const cancellableStages = ['Initializing upload', 'Queued for processing', 'Receiving chunks']
+    return (
+      item.status === 'initializing' ||
+      (item.status === 'processing' && cancellableStages.includes(item.stage))
+    )
+  }
+
+  const handleCancel = async (uploadId: string) => {
+    setCancellingIds((prev) => new Set(prev).add(uploadId))
+
+    try {
+      const token = localStorage.getItem('admin_token')
+      const response = await fetch(`/api/queues/${uploadId}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      })
+
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(text || 'Failed to cancel')
+      }
+
+      // Refresh queues
+      fetchQueues()
+    } catch (err) {
+      console.error('Failed to cancel queue item:', err)
+    } finally {
+      setCancellingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(uploadId)
+        return next
+      })
+    }
+  }
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -189,7 +228,37 @@ export default function ProcessingQueues() {
                           </div>
                           {getStatusBadge(item.status)}
                         </div>
-                        <span className='text-sm font-bold'>{item.percentage}%</span>
+                        <div className='flex items-center gap-2'>
+                          <span className='text-sm font-bold'>{item.percentage}%</span>
+                          {isCancellable(item) && (
+                            <button
+                              className='btn btn-ghost btn-xs text-error'
+                              onClick={() => handleCancel(item.upload_id)}
+                              disabled={cancellingIds.has(item.upload_id)}
+                              title='Cancel this upload'
+                            >
+                              {cancellingIds.has(item.upload_id) ? (
+                                <span className='loading loading-spinner loading-xs'></span>
+                              ) : (
+                                <svg
+                                  xmlns='http://www.w3.org/2000/svg'
+                                  width='14'
+                                  height='14'
+                                  viewBox='0 0 24 24'
+                                  fill='none'
+                                  stroke='currentColor'
+                                  strokeWidth='2'
+                                  strokeLinecap='round'
+                                  strokeLinejoin='round'
+                                >
+                                  <circle cx='12' cy='12' r='10' />
+                                  <line x1='15' x2='9' y1='9' y2='15' />
+                                  <line x1='9' x2='15' y1='9' y2='15' />
+                                </svg>
+                              )}
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <progress
                         className='progress progress-primary w-full h-2'

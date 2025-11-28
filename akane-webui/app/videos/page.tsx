@@ -51,6 +51,11 @@ export default function Videos() {
   const [previewVideo, setPreviewVideo] = useState<Video | null>(null)
   const [editVideo, setEditVideo] = useState<Video | null>(null)
 
+  // Selection state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+
   const loadVideos = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -143,6 +148,61 @@ export default function Videos() {
     )
   }
 
+  // Selection handlers
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === videos.length) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(videos.map((v) => v.id)))
+    }
+  }
+
+  const handleDeleteSelected = async () => {
+    if (selectedIds.size === 0) return
+
+    setIsDeleting(true)
+    setError(null)
+
+    try {
+      const token = localStorage.getItem('admin_token')
+      const res = await fetch('/api/videos', {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ ids: Array.from(selectedIds) })
+      })
+
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || 'Failed to delete videos')
+      }
+
+      // Clear selection and reload
+      setSelectedIds(new Set())
+      setDeleteConfirmOpen(false)
+      loadVideos()
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err)
+      setError(errorMessage)
+    } finally {
+      setIsDeleting(false)
+    }
+  }
+
   return (
     <div className='min-h-screen bg-base-200 p-10 font-sans'>
       <div className='mx-auto max-w-7xl'>
@@ -192,10 +252,20 @@ export default function Videos() {
               <option value='50'>50</option>
             </select>
           </div>
-          <div className='pb-1'>
+          <div className='pb-1 flex gap-2'>
             <Button type='submit' disabled={loading}>
               Search
             </Button>
+            {selectedIds.size > 0 && (
+              <Button
+                type='button'
+                variant='outline'
+                onClick={() => setDeleteConfirmOpen(true)}
+                className='btn-error'
+              >
+                Delete ({selectedIds.size})
+              </Button>
+            )}
           </div>
         </form>
 
@@ -222,6 +292,14 @@ export default function Videos() {
           <table className='table w-full'>
             <thead>
               <tr>
+                <th className='w-10'>
+                  <input
+                    type='checkbox'
+                    className='checkbox checkbox-sm'
+                    checked={videos.length > 0 && selectedIds.size === videos.length}
+                    onChange={toggleSelectAll}
+                  />
+                </th>
                 <th>Video</th>
                 <th>Tags</th>
                 <th>Stats</th>
@@ -233,20 +311,28 @@ export default function Videos() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={6} className='text-center py-12'>
+                  <td colSpan={7} className='text-center py-12'>
                     <span className='loading loading-spinner loading-lg'></span>
                     <div className='mt-2'>Loading videos...</div>
                   </td>
                 </tr>
               ) : videos.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className='text-center py-12 text-base-content/70'>
+                  <td colSpan={7} className='text-center py-12 text-base-content/70'>
                     No videos found matching your criteria.
                   </td>
                 </tr>
               ) : (
                 videos.map((video, idx) => (
-                  <tr key={idx} className='hover'>
+                  <tr key={idx} className={`hover ${selectedIds.has(video.id) ? 'bg-base-200' : ''}`}>
+                    <td>
+                      <input
+                        type='checkbox'
+                        className='checkbox checkbox-sm'
+                        checked={selectedIds.has(video.id)}
+                        onChange={() => toggleSelect(video.id)}
+                      />
+                    </td>
                     <td>
                       <div className='flex items-center gap-3'>
                         <div className='avatar'>
@@ -380,6 +466,43 @@ export default function Videos() {
         video={editVideo}
         onSave={handleSaveVideo}
       />
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirmOpen && (
+        <div className='modal modal-open'>
+          <div className='modal-box'>
+            <h3 className='font-bold text-lg text-error'>Confirm Deletion</h3>
+            <p className='py-4'>
+              Are you sure you want to delete {selectedIds.size} video{selectedIds.size !== 1 ? 's' : ''}? 
+              This action cannot be undone.
+            </p>
+            <div className='modal-action'>
+              <button
+                className='btn'
+                onClick={() => setDeleteConfirmOpen(false)}
+                disabled={isDeleting}
+              >
+                Cancel
+              </button>
+              <button
+                className='btn btn-error'
+                onClick={handleDeleteSelected}
+                disabled={isDeleting}
+              >
+                {isDeleting ? (
+                  <>
+                    <span className='loading loading-spinner loading-sm'></span>
+                    Deleting...
+                  </>
+                ) : (
+                  'Delete'
+                )}
+              </button>
+            </div>
+          </div>
+          <div className='modal-backdrop' onClick={() => !isDeleting && setDeleteConfirmOpen(false)}></div>
+        </div>
+      )}
     </div>
   )
 }
