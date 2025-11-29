@@ -56,7 +56,6 @@ export default function Videos() {
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
-  const [exportMenuOpen, setExportMenuOpen] = useState(false)
 
   // Helper to get selected IDs
   const selectedIds = new Set(selectedVideos.keys())
@@ -240,12 +239,10 @@ export default function Videos() {
     const videosToExport = Array.from(selectedVideos.values())
     const csv = generateCSV(videosToExport)
     downloadCSV(csv, `videos_selected_${selectedVideos.size}_${new Date().toISOString().split('T')[0]}.csv`)
-    setExportMenuOpen(false)
   }
 
   const exportAllVideos = async () => {
     setIsExporting(true)
-    setExportMenuOpen(false)
     try {
       const token = localStorage.getItem('admin_token')
       const allVideos: Video[] = []
@@ -369,7 +366,7 @@ export default function Videos() {
             <Button type='submit' disabled={loading}>
               Search
             </Button>
-            {selectedVideos.size > 0 && (
+            {selectedVideos.size > 0 ? (
               <>
                 <Button
                   type='button'
@@ -386,14 +383,8 @@ export default function Videos() {
                   Clear
                 </Button>
               </>
-            )}
-            <div className='dropdown dropdown-end'>
-              <button
-                type='button'
-                tabIndex={0}
-                className='btn btn-outline btn-sm'
-                onClick={() => setExportMenuOpen(!exportMenuOpen)}
-              >
+            ) : (
+              <Button type='button' variant='outline' onClick={exportAllVideos} disabled={isExporting || total === 0}>
                 {isExporting ? (
                   <>
                     <span className='loading loading-spinner loading-sm'></span>
@@ -415,27 +406,11 @@ export default function Videos() {
                         d='M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4'
                       />
                     </svg>
-                    Export CSV
+                    Export All ({total})
                   </>
                 )}
-              </button>
-              {exportMenuOpen && (
-                <ul tabIndex={0} className='dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-52'>
-                  <li>
-                    <button type='button' onClick={exportAllVideos} disabled={isExporting}>
-                      Export All ({total})
-                    </button>
-                  </li>
-                  {selectedVideos.size > 0 && (
-                    <li>
-                      <button type='button' onClick={exportSelectedVideos} disabled={isExporting}>
-                        Export Selected ({selectedVideos.size})
-                      </button>
-                    </li>
-                  )}
-                </ul>
-              )}
-            </div>
+              </Button>
+            )}
           </div>
         </form>
 
