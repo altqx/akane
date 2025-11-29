@@ -388,7 +388,12 @@ export default function Videos() {
               </>
             )}
             <div className='dropdown dropdown-end'>
-              <label tabIndex={0} className='btn btn-outline btn-sm' onClick={() => setExportMenuOpen(!exportMenuOpen)}>
+              <button
+                type='button'
+                tabIndex={0}
+                className='btn btn-outline btn-sm'
+                onClick={() => setExportMenuOpen(!exportMenuOpen)}
+              >
                 {isExporting ? (
                   <>
                     <span className='loading loading-spinner loading-sm'></span>
@@ -413,17 +418,17 @@ export default function Videos() {
                     Export CSV
                   </>
                 )}
-              </label>
+              </button>
               {exportMenuOpen && (
                 <ul tabIndex={0} className='dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-52'>
                   <li>
-                    <button onClick={exportAllVideos} disabled={isExporting}>
+                    <button type='button' onClick={exportAllVideos} disabled={isExporting}>
                       Export All ({total})
                     </button>
                   </li>
                   {selectedVideos.size > 0 && (
                     <li>
-                      <button onClick={exportSelectedVideos} disabled={isExporting}>
+                      <button type='button' onClick={exportSelectedVideos} disabled={isExporting}>
                         Export Selected ({selectedVideos.size})
                       </button>
                     </li>
