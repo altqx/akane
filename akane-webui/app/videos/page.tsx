@@ -126,6 +126,18 @@ export default function Videos() {
     }
   }
 
+  const copyLink = async (video: Video) => {
+    if (!video.player_url) return
+    const code = `${window.location.origin}${video.player_url}`
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopiedId(video.id)
+      setTimeout(() => setCopiedId(null), 2000)
+    } catch (err) {
+      console.error('Failed to copy:', err)
+    }
+  }
+
   const handleSaveVideo = async (id: string, name: string, tags: string[]) => {
     const token = localStorage.getItem('admin_token')
     const res = await fetch(`/api/videos/${id}`, {
@@ -401,6 +413,11 @@ export default function Videos() {
                         {video.player_url && (
                           <Button size='sm' variant='secondary' onClick={() => copyEmbedCode(video)} className='btn-xs'>
                             {copiedId === video.id ? 'Copied!' : 'Copy Embed'}
+                          </Button>
+                        )}
+                        {video.player_url && (
+                          <Button size='sm' variant='secondary' onClick={() => copyLink(video)} className='btn-xs'>
+                            {copiedId === video.id ? 'Copied!' : 'Copy Link'}
                           </Button>
                         )}
                         {video.playlist_url && (
