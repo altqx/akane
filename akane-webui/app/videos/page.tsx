@@ -51,10 +51,15 @@ export default function Videos() {
   const [previewVideo, setPreviewVideo] = useState<Video | null>(null)
   const [editVideo, setEditVideo] = useState<Video | null>(null)
 
-  // Selection state
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  // Selection state - store full video objects to persist across pages
+  const [selectedVideos, setSelectedVideos] = useState<Map<string, Video>>(new Map())
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
+
+  // Helper to get selected IDs
+  const selectedIds = new Set(selectedVideos.keys())
 
   const loadVideos = useCallback(async () => {
     setLoading(true)
@@ -155,34 +160,130 @@ export default function Videos() {
     }
 
     // Update local state
-    setVideos((prev) =>
-      prev.map((v) => (v.id === id ? { ...v, name, tags } : v))
-    )
+    setVideos((prev) => prev.map((v) => (v.id === id ? { ...v, name, tags } : v)))
   }
 
   // Selection handlers
-  const toggleSelect = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) {
-        next.delete(id)
+  const toggleSelect = (video: Video) => {
+    setSelectedVideos((prev) => {
+      const next = new Map(prev)
+      if (next.has(video.id)) {
+        next.delete(video.id)
       } else {
-        next.add(id)
+        next.set(video.id, video)
       }
       return next
     })
   }
 
   const toggleSelectAll = () => {
-    if (selectedIds.size === videos.length) {
-      setSelectedIds(new Set())
+    if (videos.every((v) => selectedIds.has(v.id))) {
+      // Deselect all current page videos
+      setSelectedVideos((prev) => {
+        const next = new Map(prev)
+        videos.forEach((v) => next.delete(v.id))
+        return next
+      })
     } else {
-      setSelectedIds(new Set(videos.map((v) => v.id)))
+      // Select all current page videos
+      setSelectedVideos((prev) => {
+        const next = new Map(prev)
+        videos.forEach((v) => next.set(v.id, v))
+        return next
+      })
+    }
+  }
+
+  const clearSelection = () => {
+    setSelectedVideos(new Map())
+  }
+
+  // CSV Export helpers
+  const escapeCSV = (value: string): string => {
+    if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+      return `"${value.replace(/"/g, '""')}"`
+    }
+    return value
+  }
+
+  const generateCSV = (videosToExport: Video[]): string => {
+    const headers = ['No.', 'ID', 'Video Name', 'Tags', 'Thumbnail Link', 'Player URL', 'Iframe Code']
+    const rows = videosToExport.map((video, index) => {
+      const playerUrl = video.player_url ? `${window.location.origin}${video.player_url}` : ''
+      const iframeCode = video.player_url
+        ? `<iframe src="${window.location.origin}${video.player_url}" width="100%" height="100%" frameborder="0" allowfullscreen></iframe>`
+        : ''
+      return [
+        (index + 1).toString(),
+        video.id,
+        escapeCSV(video.name),
+        escapeCSV(video.tags.join(', ')),
+        video.thumbnail_url || '',
+        playerUrl,
+        escapeCSV(iframeCode)
+      ].join(',')
+    })
+    return [headers.join(','), ...rows].join('\n')
+  }
+
+  const downloadCSV = (csv: string, filename: string) => {
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = filename
+    link.click()
+    URL.revokeObjectURL(link.href)
+  }
+
+  const exportSelectedVideos = () => {
+    if (selectedVideos.size === 0) return
+    const videosToExport = Array.from(selectedVideos.values())
+    const csv = generateCSV(videosToExport)
+    downloadCSV(csv, `videos_selected_${selectedVideos.size}_${new Date().toISOString().split('T')[0]}.csv`)
+    setExportMenuOpen(false)
+  }
+
+  const exportAllVideos = async () => {
+    setIsExporting(true)
+    setExportMenuOpen(false)
+    try {
+      const token = localStorage.getItem('admin_token')
+      const allVideos: Video[] = []
+      let currentPage = 1
+      let hasMore = true
+
+      // Fetch all pages
+      while (hasMore) {
+        const params = new URLSearchParams()
+        params.set('page', currentPage.toString())
+        params.set('page_size', '100') // Fetch in larger chunks for efficiency
+        if (nameFilter) params.set('name', nameFilter)
+        if (tagFilter) params.set('tag', tagFilter)
+
+        const res = await fetch(`/api/videos?${params.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+
+        if (!res.ok) throw new Error('Failed to fetch videos')
+
+        const data: VideoResponse = await res.json()
+        allVideos.push(...(data.items || []))
+        hasMore = data.has_next
+        currentPage++
+      }
+
+      const csv = generateCSV(allVideos)
+      downloadCSV(csv, `videos_all_${allVideos.length}_${new Date().toISOString().split('T')[0]}.csv`)
+    } catch (err) {
+      console.error('Export failed:', err)
+      setError('Failed to export videos')
+    } finally {
+      setIsExporting(false)
     }
   }
 
   const handleDeleteSelected = async () => {
-    if (selectedIds.size === 0) return
+    if (selectedVideos.size === 0) return
 
     setIsDeleting(true)
     setError(null)
@@ -204,7 +305,7 @@ export default function Videos() {
       }
 
       // Clear selection and reload
-      setSelectedIds(new Set())
+      clearSelection()
       setDeleteConfirmOpen(false)
       loadVideos()
     } catch (err: unknown) {
@@ -268,16 +369,68 @@ export default function Videos() {
             <Button type='submit' disabled={loading}>
               Search
             </Button>
-            {selectedIds.size > 0 && (
-              <Button
-                type='button'
-                variant='outline'
-                onClick={() => setDeleteConfirmOpen(true)}
-                className='btn-error'
-              >
-                Delete ({selectedIds.size})
-              </Button>
+            {selectedVideos.size > 0 && (
+              <>
+                <Button
+                  type='button'
+                  variant='outline'
+                  onClick={() => setDeleteConfirmOpen(true)}
+                  className='btn-error'
+                >
+                  Delete ({selectedVideos.size})
+                </Button>
+                <Button type='button' variant='secondary' onClick={exportSelectedVideos}>
+                  Export Selected ({selectedVideos.size})
+                </Button>
+                <Button type='button' variant='ghost' onClick={clearSelection} className='btn-xs'>
+                  Clear
+                </Button>
+              </>
             )}
+            <div className='dropdown dropdown-end'>
+              <label tabIndex={0} className='btn btn-outline btn-sm' onClick={() => setExportMenuOpen(!exportMenuOpen)}>
+                {isExporting ? (
+                  <>
+                    <span className='loading loading-spinner loading-sm'></span>
+                    Exporting...
+                  </>
+                ) : (
+                  <>
+                    <svg
+                      xmlns='http://www.w3.org/2000/svg'
+                      className='h-4 w-4 mr-1'
+                      fill='none'
+                      viewBox='0 0 24 24'
+                      stroke='currentColor'
+                    >
+                      <path
+                        strokeLinecap='round'
+                        strokeLinejoin='round'
+                        strokeWidth={2}
+                        d='M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4'
+                      />
+                    </svg>
+                    Export CSV
+                  </>
+                )}
+              </label>
+              {exportMenuOpen && (
+                <ul tabIndex={0} className='dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-52'>
+                  <li>
+                    <button onClick={exportAllVideos} disabled={isExporting}>
+                      Export All ({total})
+                    </button>
+                  </li>
+                  {selectedVideos.size > 0 && (
+                    <li>
+                      <button onClick={exportSelectedVideos} disabled={isExporting}>
+                        Export Selected ({selectedVideos.size})
+                      </button>
+                    </li>
+                  )}
+                </ul>
+              )}
+            </div>
           </div>
         </form>
 
@@ -308,7 +461,7 @@ export default function Videos() {
                   <input
                     type='checkbox'
                     className='checkbox checkbox-sm'
-                    checked={videos.length > 0 && selectedIds.size === videos.length}
+                    checked={videos.length > 0 && videos.every((v) => selectedIds.has(v.id))}
                     onChange={toggleSelectAll}
                   />
                 </th>
@@ -342,7 +495,7 @@ export default function Videos() {
                         type='checkbox'
                         className='checkbox checkbox-sm'
                         checked={selectedIds.has(video.id)}
-                        onChange={() => toggleSelect(video.id)}
+                        onChange={() => toggleSelect(video)}
                       />
                     </td>
                     <td>
@@ -393,9 +546,25 @@ export default function Videos() {
                             className='btn-xs'
                             title='Preview video'
                           >
-                            <svg xmlns='http://www.w3.org/2000/svg' className='h-4 w-4' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
-                              <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z' />
-                              <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M21 12a9 9 0 11-18 0 9 9 0 0118 0z' />
+                            <svg
+                              xmlns='http://www.w3.org/2000/svg'
+                              className='h-4 w-4'
+                              fill='none'
+                              viewBox='0 0 24 24'
+                              stroke='currentColor'
+                            >
+                              <path
+                                strokeLinecap='round'
+                                strokeLinejoin='round'
+                                strokeWidth={2}
+                                d='M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z'
+                              />
+                              <path
+                                strokeLinecap='round'
+                                strokeLinejoin='round'
+                                strokeWidth={2}
+                                d='M21 12a9 9 0 11-18 0 9 9 0 0118 0z'
+                              />
                             </svg>
                           </Button>
                         )}
@@ -406,8 +575,19 @@ export default function Videos() {
                           className='btn-xs'
                           title='Edit video'
                         >
-                          <svg xmlns='http://www.w3.org/2000/svg' className='h-4 w-4' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
-                            <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z' />
+                          <svg
+                            xmlns='http://www.w3.org/2000/svg'
+                            className='h-4 w-4'
+                            fill='none'
+                            viewBox='0 0 24 24'
+                            stroke='currentColor'
+                          >
+                            <path
+                              strokeLinecap='round'
+                              strokeLinejoin='round'
+                              strokeWidth={2}
+                              d='M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z'
+                            />
                           </svg>
                         </Button>
                         {video.player_url && (
@@ -490,22 +670,14 @@ export default function Videos() {
           <div className='modal-box'>
             <h3 className='font-bold text-lg text-error'>Confirm Deletion</h3>
             <p className='py-4'>
-              Are you sure you want to delete {selectedIds.size} video{selectedIds.size !== 1 ? 's' : ''}? 
-              This action cannot be undone.
+              Are you sure you want to delete {selectedVideos.size} video{selectedVideos.size !== 1 ? 's' : ''}? This
+              action cannot be undone.
             </p>
             <div className='modal-action'>
-              <button
-                className='btn'
-                onClick={() => setDeleteConfirmOpen(false)}
-                disabled={isDeleting}
-              >
+              <button className='btn' onClick={() => setDeleteConfirmOpen(false)} disabled={isDeleting}>
                 Cancel
               </button>
-              <button
-                className='btn btn-error'
-                onClick={handleDeleteSelected}
-                disabled={isDeleting}
-              >
+              <button className='btn btn-error' onClick={handleDeleteSelected} disabled={isDeleting}>
                 {isDeleting ? (
                   <>
                     <span className='loading loading-spinner loading-sm'></span>
