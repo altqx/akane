@@ -10,7 +10,7 @@ pub struct ViewRow {
     pub video_id: String,
     pub ip_address: String,
     pub user_agent: String,
-    pub created_at: u32, // DateTime in ClickHouse is stored as u32 Unix timestamp
+    pub created_at: u32,
 }
 
 pub fn initialize_client(config: &ClickHouseConfig) -> Client {

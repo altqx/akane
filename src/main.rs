@@ -104,6 +104,20 @@ async fn main() -> Result<()> {
     let public_routes = Router::new()
         .route("/videos/{id}/heartbeat", post(handlers::heartbeat))
         .route("/videos/{id}/view", post(handlers::track_view))
+        .route("/videos/{id}/subtitles", get(handlers::get_video_subtitles))
+        .route(
+            "/videos/{id}/subtitles/{track_with_ext}",
+            get(handlers::get_subtitle_file),
+        )
+        .route(
+            "/videos/{id}/attachments",
+            get(handlers::get_video_attachments),
+        )
+        .route(
+            "/videos/{id}/attachments/{filename}",
+            get(handlers::get_attachment_file),
+        )
+        .route("/videos/{id}/chapters", get(handlers::get_video_chapters))
         .route("/analytics/realtime", get(handlers::get_realtime_analytics))
         .route("/analytics/history", get(handlers::get_analytics_history))
         .route("/analytics/videos", get(handlers::get_analytics_videos))
@@ -131,6 +145,7 @@ async fn main() -> Result<()> {
         .nest("/api", api_routes)
         .route("/hls/{id}/{*file}", get(handlers::get_hls_file))
         .route("/player/{id}", get(handlers::get_player))
+        .route("/jassub/{filename}", get(handlers::get_jassub_worker))
         .nest_service(
             "/admin-webui",
             ServeDir::new("webui")

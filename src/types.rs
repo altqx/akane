@@ -1,6 +1,5 @@
 use crate::config::Config;
 use aws_sdk_s3::Client as S3Client;
-use clickhouse;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -18,7 +17,7 @@ pub struct ProgressUpdate {
     pub result: Option<UploadResponse>,
     pub error: Option<String>,
     pub video_name: Option<String>,
-    pub created_at: u64, // Unix timestamp in milliseconds for queue ordering
+    pub created_at: u64,
 }
 
 pub type ProgressMap = Arc<RwLock<HashMap<String, ProgressUpdate>>>;
@@ -107,7 +106,7 @@ pub struct QueueItem {
     pub details: Option<String>,
     pub status: String,
     pub video_name: Option<String>,
-    pub created_at: u64, // Unix timestamp in milliseconds for queue ordering
+    pub created_at: u64,
 }
 
 #[derive(Serialize)]
@@ -139,4 +138,74 @@ pub struct ChunkUploadResponse {
 pub struct FinalizeUploadRequest {
     pub name: String,
     pub tags: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubtitleTrack {
+    pub id: i64,
+    pub video_id: String,
+    pub track_index: i32,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub codec: String,
+    pub storage_key: String,
+    pub is_default: bool,
+    pub is_forced: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: i64,
+    pub video_id: String,
+    pub filename: String,
+    pub mimetype: String,
+    pub storage_key: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SubtitleStreamInfo {
+    pub stream_index: i32,
+    pub codec_name: String,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub is_default: bool,
+    pub is_forced: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct AttachmentInfo {
+    pub filename: String,
+    pub mimetype: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Chapter {
+    pub id: i64,
+    pub video_id: String,
+    pub chapter_index: i32,
+    pub start_time: f64,
+    pub end_time: f64,
+    pub title: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChapterInfo {
+    pub start_time: f64,
+    pub end_time: f64,
+    pub title: String,
+}
+
+#[derive(Serialize)]
+pub struct SubtitleListResponse {
+    pub subtitles: Vec<SubtitleTrack>,
+}
+
+#[derive(Serialize)]
+pub struct AttachmentListResponse {
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Serialize)]
+pub struct ChapterListResponse {
+    pub chapters: Vec<Chapter>,
 }

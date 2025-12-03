@@ -1,4 +1,4 @@
-use crate::types::{VideoDto, VideoQuery};
+use crate::types::{Attachment, Chapter, SubtitleTrack, VideoDto, VideoQuery};
 use anyhow::{Context, Result};
 use sqlx::{Sqlite, SqlitePool, migrate::MigrateDatabase};
 use std::collections::HashMap;
@@ -95,10 +95,12 @@ pub async fn count_videos(db_pool: &SqlitePool, filters: &VideoQuery) -> Result<
         (None, Some(tag)) => {
             let safe_tag = tag.replace("\"", "");
             let pattern = format!("tags:\"{}\"", safe_tag);
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) as count FROM videos_fts WHERE videos_fts MATCH ?")
-                .bind(pattern)
-                .fetch_one(db_pool)
-                .await?
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) as count FROM videos_fts WHERE videos_fts MATCH ?",
+            )
+            .bind(pattern)
+            .fetch_one(db_pool)
+            .await?
         }
         (Some(name), Some(tag)) => {
             let safe_name = name.replace("\"", "");
@@ -248,24 +250,19 @@ pub async fn update_video(
 ) -> Result<()> {
     let tags_json = serde_json::to_string(tags)?;
 
-    let rows_affected = sqlx::query(
-        "UPDATE videos SET name = ?, tags = ? WHERE id = ?",
-    )
-    .bind(name)
-    .bind(&tags_json)
-    .bind(video_id)
-    .execute(db_pool)
-    .await?
-    .rows_affected();
+    let rows_affected = sqlx::query("UPDATE videos SET name = ?, tags = ? WHERE id = ?")
+        .bind(name)
+        .bind(&tags_json)
+        .bind(video_id)
+        .execute(db_pool)
+        .await?
+        .rows_affected();
 
     if rows_affected == 0 {
         anyhow::bail!("Video not found");
     }
 
-    info!(
-        "Video updated in database: id={}, name={}",
-        video_id, name
-    );
+    info!("Video updated in database: id={}, name={}", video_id, name);
 
     Ok(())
 }
@@ -295,7 +292,10 @@ pub async fn delete_videos(db_pool: &SqlitePool, video_ids: &[String]) -> Result
     Ok(deleted)
 }
 
-pub async fn get_video_ids_with_prefix(db_pool: &SqlitePool, video_ids: &[String]) -> Result<Vec<String>> {
+pub async fn get_video_ids_with_prefix(
+    db_pool: &SqlitePool,
+    video_ids: &[String],
+) -> Result<Vec<String>> {
     if video_ids.is_empty() {
         return Ok(vec![]);
     }
@@ -322,19 +322,23 @@ pub async fn get_all_videos_summary(
     limit: Option<i64>,
 ) -> Result<Vec<VideoSummary>> {
     let query = if let Some(l) = limit {
-        format!("SELECT id, name, created_at, thumbnail_key \
+        format!(
+            "SELECT id, name, created_at, thumbnail_key \
          FROM videos \
          ORDER BY datetime(created_at) DESC \
-         LIMIT {}", l)
+         LIMIT {}",
+            l
+        )
     } else {
         "SELECT id, name, created_at, thumbnail_key \
          FROM videos \
-         ORDER BY datetime(created_at) DESC".to_string()
+         ORDER BY datetime(created_at) DESC"
+            .to_string()
     };
 
     let rows = sqlx::query_as::<_, VideoSummary>(&query)
-    .fetch_all(db_pool)
-    .await?;
+        .fetch_all(db_pool)
+        .await?;
 
     // Update view counts from ClickHouse data
     let rows = rows
@@ -348,4 +352,250 @@ pub async fn get_all_videos_summary(
         .collect();
 
     Ok(rows)
+}
+
+// Subtitle CRUD operations
+
+#[derive(sqlx::FromRow)]
+struct SubtitleRow {
+    id: i64,
+    video_id: String,
+    track_index: i32,
+    language: Option<String>,
+    title: Option<String>,
+    codec: String,
+    storage_key: String,
+    is_default: i32,
+    is_forced: i32,
+}
+
+pub async fn save_subtitle(
+    db_pool: &SqlitePool,
+    video_id: &str,
+    track_index: i32,
+    language: Option<&str>,
+    title: Option<&str>,
+    codec: &str,
+    storage_key: &str,
+    is_default: bool,
+    is_forced: bool,
+) -> Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO subtitles (video_id, track_index, language, title, codec, storage_key, is_default, is_forced) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(video_id)
+    .bind(track_index)
+    .bind(language)
+    .bind(title)
+    .bind(codec)
+    .bind(storage_key)
+    .bind(is_default as i32)
+    .bind(is_forced as i32)
+    .execute(db_pool)
+    .await?;
+
+    info!(
+        "Subtitle saved to database: video_id={}, track_index={}, codec={}",
+        video_id, track_index, codec
+    );
+
+    Ok(result.last_insert_rowid())
+}
+
+pub async fn get_subtitles_for_video(
+    db_pool: &SqlitePool,
+    video_id: &str,
+) -> Result<Vec<SubtitleTrack>> {
+    let rows: Vec<SubtitleRow> = sqlx::query_as(
+        "SELECT id, video_id, track_index, language, title, codec, storage_key, is_default, is_forced 
+         FROM subtitles WHERE video_id = ? ORDER BY track_index"
+    )
+    .bind(video_id)
+    .fetch_all(db_pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| SubtitleTrack {
+            id: r.id,
+            video_id: r.video_id,
+            track_index: r.track_index,
+            language: r.language,
+            title: r.title,
+            codec: r.codec,
+            storage_key: r.storage_key,
+            is_default: r.is_default != 0,
+            is_forced: r.is_forced != 0,
+        })
+        .collect())
+}
+
+pub async fn get_subtitle_by_track(
+    db_pool: &SqlitePool,
+    video_id: &str,
+    track_index: i32,
+) -> Result<Option<SubtitleTrack>> {
+    let row: Option<SubtitleRow> = sqlx::query_as(
+        "SELECT id, video_id, track_index, language, title, codec, storage_key, is_default, is_forced 
+         FROM subtitles WHERE video_id = ? AND track_index = ?"
+    )
+    .bind(video_id)
+    .bind(track_index)
+    .fetch_optional(db_pool)
+    .await?;
+
+    Ok(row.map(|r| SubtitleTrack {
+        id: r.id,
+        video_id: r.video_id,
+        track_index: r.track_index,
+        language: r.language,
+        title: r.title,
+        codec: r.codec,
+        storage_key: r.storage_key,
+        is_default: r.is_default != 0,
+        is_forced: r.is_forced != 0,
+    }))
+}
+
+// Attachment CRUD operations
+
+#[derive(sqlx::FromRow)]
+struct AttachmentRow {
+    id: i64,
+    video_id: String,
+    filename: String,
+    mimetype: String,
+    storage_key: String,
+}
+
+pub async fn save_attachment(
+    db_pool: &SqlitePool,
+    video_id: &str,
+    filename: &str,
+    mimetype: &str,
+    storage_key: &str,
+) -> Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO attachments (video_id, filename, mimetype, storage_key) VALUES (?, ?, ?, ?)",
+    )
+    .bind(video_id)
+    .bind(filename)
+    .bind(mimetype)
+    .bind(storage_key)
+    .execute(db_pool)
+    .await?;
+
+    info!(
+        "Attachment saved to database: video_id={}, filename={}, mimetype={}",
+        video_id, filename, mimetype
+    );
+
+    Ok(result.last_insert_rowid())
+}
+
+pub async fn get_attachments_for_video(
+    db_pool: &SqlitePool,
+    video_id: &str,
+) -> Result<Vec<Attachment>> {
+    let rows: Vec<AttachmentRow> = sqlx::query_as(
+        "SELECT id, video_id, filename, mimetype, storage_key FROM attachments WHERE video_id = ?",
+    )
+    .bind(video_id)
+    .fetch_all(db_pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| Attachment {
+            id: r.id,
+            video_id: r.video_id,
+            filename: r.filename,
+            mimetype: r.mimetype,
+            storage_key: r.storage_key,
+        })
+        .collect())
+}
+
+pub async fn get_attachment_by_filename(
+    db_pool: &SqlitePool,
+    video_id: &str,
+    filename: &str,
+) -> Result<Option<Attachment>> {
+    let row: Option<AttachmentRow> = sqlx::query_as(
+        "SELECT id, video_id, filename, mimetype, storage_key FROM attachments WHERE video_id = ? AND filename = ?"
+    )
+    .bind(video_id)
+    .bind(filename)
+    .fetch_optional(db_pool)
+    .await?;
+
+    Ok(row.map(|r| Attachment {
+        id: r.id,
+        video_id: r.video_id,
+        filename: r.filename,
+        mimetype: r.mimetype,
+        storage_key: r.storage_key,
+    }))
+}
+
+// Chapter CRUD operations
+
+#[derive(sqlx::FromRow)]
+struct ChapterRow {
+    id: i64,
+    video_id: String,
+    chapter_index: i32,
+    start_time: f64,
+    end_time: f64,
+    title: String,
+}
+
+pub async fn save_chapter(
+    db_pool: &SqlitePool,
+    video_id: &str,
+    chapter_index: i32,
+    start_time: f64,
+    end_time: f64,
+    title: &str,
+) -> Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO chapters (video_id, chapter_index, start_time, end_time, title) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(video_id)
+    .bind(chapter_index)
+    .bind(start_time)
+    .bind(end_time)
+    .bind(title)
+    .execute(db_pool)
+    .await?;
+
+    info!(
+        "Chapter saved to database: video_id={}, index={}, title={}",
+        video_id, chapter_index, title
+    );
+
+    Ok(result.last_insert_rowid())
+}
+
+pub async fn get_chapters_for_video(db_pool: &SqlitePool, video_id: &str) -> Result<Vec<Chapter>> {
+    let rows: Vec<ChapterRow> = sqlx::query_as(
+        "SELECT id, video_id, chapter_index, start_time, end_time, title 
+         FROM chapters WHERE video_id = ? ORDER BY chapter_index",
+    )
+    .bind(video_id)
+    .fetch_all(db_pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| Chapter {
+            id: r.id,
+            video_id: r.video_id,
+            chapter_index: r.chapter_index,
+            start_time: r.start_time,
+            end_time: r.end_time,
+            title: r.title,
+        })
+        .collect())
 }

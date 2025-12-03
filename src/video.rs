@@ -1,11 +1,13 @@
-use crate::types::{ProgressMap, ProgressUpdate, VideoVariant};
+use crate::types::{
+    AttachmentInfo, ChapterInfo, ProgressMap, ProgressUpdate, SubtitleStreamInfo, VideoVariant,
+};
 use anyhow::{Context, Result};
 use futures::future::try_join_all;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::{fs, process::Command};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub async fn get_video_metadata(input: &PathBuf) -> Result<(u32, u32)> {
     // Using JSON output
@@ -51,6 +53,227 @@ pub async fn get_video_duration(input: &PathBuf) -> Result<u32> {
     // Keep for backward compatibility or individual usage
     let (_, d) = get_video_metadata(input).await?;
     Ok(d)
+}
+
+// Get subtitle stream information from video file using ffprobe
+pub async fn get_subtitle_streams(input: &PathBuf) -> Result<Vec<SubtitleStreamInfo>> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("s")
+        .arg("-show_entries")
+        .arg("stream=index,codec_name:stream_tags=language,title:stream_disposition=default,forced")
+        .arg("-of")
+        .arg("json")
+        .arg(input)
+        .output()
+        .await
+        .context("failed to run ffprobe for subtitles")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ffprobe for subtitles failed: {stderr}");
+    }
+
+    let json_str = String::from_utf8(output.stdout)?;
+    let v: serde_json::Value = serde_json::from_str(&json_str)?;
+
+    let streams = v["streams"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .enumerate()
+                .map(|(idx, s)| SubtitleStreamInfo {
+                    stream_index: s["index"].as_i64().unwrap_or(idx as i64) as i32,
+                    codec_name: s["codec_name"].as_str().unwrap_or("unknown").to_string(),
+                    language: s["tags"]["language"].as_str().map(|s| s.to_string()),
+                    title: s["tags"]["title"].as_str().map(|s| s.to_string()),
+                    is_default: s["disposition"]["default"].as_i64().unwrap_or(0) == 1,
+                    is_forced: s["disposition"]["forced"].as_i64().unwrap_or(0) == 1,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(streams)
+}
+
+// Get attachment information (fonts) from video file using ffprobe
+pub async fn get_attachments(input: &PathBuf) -> Result<Vec<AttachmentInfo>> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("t")
+        .arg("-show_entries")
+        .arg("stream=index:stream_tags=filename,mimetype")
+        .arg("-of")
+        .arg("json")
+        .arg(input)
+        .output()
+        .await
+        .context("failed to run ffprobe for attachments")?;
+
+    if !output.status.success() {
+        // No attachments is not an error
+        return Ok(Vec::new());
+    }
+
+    let json_str = String::from_utf8(output.stdout)?;
+    let v: serde_json::Value = serde_json::from_str(&json_str)?;
+
+    let attachments = v["streams"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| {
+                    let filename = s["tags"]["filename"].as_str()?;
+                    let mimetype = s["tags"]["mimetype"].as_str().unwrap_or_else(|| {
+                        // Guess mimetype from extension
+                        let lowercase = filename.to_lowercase();
+                        if lowercase.ends_with(".ttf") {
+                            "font/ttf"
+                        } else if filename.ends_with(".otf") {
+                            "font/otf"
+                        } else if filename.ends_with(".woff") {
+                            "font/woff"
+                        } else if filename.ends_with(".woff2") {
+                            "font/woff2"
+                        } else {
+                            "application/octet-stream"
+                        }
+                    });
+                    Some(AttachmentInfo {
+                        filename: filename.to_string(),
+                        mimetype: mimetype.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(attachments)
+}
+
+// Get chapter information from video file using ffprobe
+pub async fn get_chapters(input: &PathBuf) -> Result<Vec<ChapterInfo>> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-show_chapters")
+        .arg("-of")
+        .arg("json")
+        .arg(input)
+        .output()
+        .await
+        .context("failed to run ffprobe for chapters")?;
+
+    if !output.status.success() {
+        // No chapters is not an error
+        return Ok(Vec::new());
+    }
+
+    let json_str = String::from_utf8(output.stdout)?;
+    let v: serde_json::Value = serde_json::from_str(&json_str)?;
+
+    let chapters = v["chapters"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let start_time = c["start_time"]
+                        .as_str()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .or_else(|| c["start_time"].as_f64())?;
+                    let end_time = c["end_time"]
+                        .as_str()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .or_else(|| c["end_time"].as_f64())?;
+                    let title = c["tags"]["title"].as_str().unwrap_or("").to_string();
+                    Some(ChapterInfo {
+                        start_time,
+                        end_time,
+                        title,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(chapters)
+}
+
+// Extract subtitle stream to a file
+pub async fn extract_subtitle(
+    input: &PathBuf,
+    subtitle_index: i32,
+    output_path: &PathBuf,
+    codec: &str,
+) -> Result<()> {
+    // Determine output format based on codec
+    let format = match codec {
+        "ass" | "ssa" => "ass",
+        "subrip" | "srt" => "srt",
+        _ => "ass",
+    };
+
+    info!(
+        "Extracting subtitle stream {} as {} to {:?}",
+        subtitle_index, format, output_path
+    );
+
+    let output = Command::new("ffmpeg")
+        .arg("-v")
+        .arg("error")
+        .arg("-y")
+        .arg("-i")
+        .arg(input)
+        .arg("-map")
+        .arg(format!("0:s:{}", subtitle_index))
+        .arg("-c:s")
+        .arg(format)
+        .arg(output_path)
+        .output()
+        .await
+        .context("failed to extract subtitle")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("Failed to extract subtitle: {}", stderr);
+        anyhow::bail!("ffmpeg subtitle extraction failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
+// Extract all attachments from a video file to a directory
+pub async fn extract_all_attachments(input: &PathBuf, output_dir: &PathBuf) -> Result<()> {
+    fs::create_dir_all(output_dir).await?;
+
+    info!("Extracting all attachments to {:?}", output_dir);
+
+    // Use -dump_attachment:t:all to extract all attachments
+    let output = Command::new("ffmpeg")
+        .arg("-v")
+        .arg("error")
+        .arg("-y")
+        .arg("-dump_attachment:t")
+        .arg("")
+        .arg("-i")
+        .arg(input)
+        .current_dir(output_dir)
+        .output()
+        .await
+        .context("failed to extract attachments")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!("FFmpeg attachment extraction message: {}", stderr);
+        // Don't fail - attachments might still be extracted
+    }
+
+    Ok(())
 }
 
 pub fn get_variants_for_height(original_height: u32) -> Vec<VideoVariant> {
@@ -350,8 +573,8 @@ pub async fn encode_to_hls(
                 .arg("-ac")
                 .arg("2");
 
-            // Map all subtitle streams and convert to WebVTT
-            cmd.arg("-c:s").arg("webvtt");
+            // Don't include subtitles in HLS output - they are extracted separately
+            cmd.arg("-sn");
 
             cmd.arg("-hls_time")
                 .arg("4")
@@ -504,35 +727,9 @@ pub async fn encode_to_hls(
     let master_playlist_path = out_dir.join("index.m3u8");
     let mut master_content = String::from("#EXTM3U\n#EXT-X-VERSION:3\n");
 
-    // Check if any variant has subtitle files
-    let mut has_subtitles = false;
     let variants_ref = get_variants_for_height(get_video_height(input.as_ref()).await?);
 
-    for variant in &variants_ref {
-        let subtitle_playlist = out_dir.join(&variant.label).join("index_vtt.m3u8");
-        if subtitle_playlist.exists() {
-            has_subtitles = true;
-            break;
-        }
-    }
-
-    // Add subtitle media group if subtitles exist
-    if has_subtitles {
-        // Add subtitle reference for each variant that has subtitles
-        for variant in &variants_ref {
-            let subtitle_playlist = out_dir.join(&variant.label).join("index_vtt.m3u8");
-            if subtitle_playlist.exists() {
-                master_content.push_str(&format!(
-                    "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"{}\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,LANGUAGE=\"en\",URI=\"{}/index_vtt.m3u8\"\n",
-                    variant.label,
-                    variant.label
-                ));
-            }
-        }
-        master_content.push_str("\n");
-    }
-
-    // Add video stream variants
+    // Add video stream variants (subtitles are handled separately via ArtPlayer)
     for variant in &variants_ref {
         let bandwidth = variant
             .bitrate
@@ -541,21 +738,12 @@ pub async fn encode_to_hls(
             .unwrap_or(1000)
             * 1000;
 
-        let stream_inf = if has_subtitles {
-            format!(
-                "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{},SUBTITLES=\"subs\"\n",
-                bandwidth,
-                (((variant.height as f32) * 16.0) / 9.0) as u32,
-                variant.height
-            )
-        } else {
-            format!(
-                "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{}\n",
-                bandwidth,
-                (((variant.height as f32) * 16.0) / 9.0) as u32,
-                variant.height
-            )
-        };
+        let stream_inf = format!(
+            "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{}\n",
+            bandwidth,
+            (((variant.height as f32) * 16.0) / 9.0) as u32,
+            variant.height
+        );
 
         master_content.push_str(&stream_inf);
         master_content.push_str(&format!("{}/index.m3u8\n", variant.label));
