@@ -32,8 +32,8 @@ use axum::{
 use futures::stream::Stream;
 use minify_js::{Session, TopLevelMode, minify};
 use std::collections::HashMap;
-use std::panic;
 use std::net::SocketAddr;
+use std::panic;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{fs, io::AsyncReadExt, io::AsyncWriteExt};
@@ -1678,8 +1678,15 @@ pub async fn get_video_subtitles(
 // Get a specific subtitle file
 pub async fn get_subtitle_file(
     State(state): State<AppState>,
-    Path((video_id, track_index)): Path<(String, i32)>,
+    Path((video_id, track_with_ext)): Path<(String, String)>,
 ) -> Result<Response, (StatusCode, String)> {
+    // Parse track index from "0.ass" or "1.srt" format
+    let track_index: i32 = track_with_ext
+        .split('.')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid track format".to_string()))?;
+
     let subtitle = get_subtitle_by_track(&state.db_pool, &video_id, track_index)
         .await
         .map_err(internal_err)?
@@ -1777,6 +1784,43 @@ pub async fn get_video_chapters(
     Ok(Json(ChapterListResponse { chapters }))
 }
 
+// Proxy JASSUB worker files to avoid CORS issues with Web Workers
+pub async fn get_jassub_worker(
+    Path(filename): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    // Only allow specific JASSUB files
+    let url = match filename.as_str() {
+        "jassub-worker.js" => "https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.js",
+        "jassub-worker.wasm" => "https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.wasm",
+        _ => return Err((StatusCode::NOT_FOUND, "File not found".to_string())),
+    };
+
+    // Fetch from CDN
+    let response = reqwest::get(url)
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+    let content_type = if filename.ends_with(".wasm") {
+        "application/wasm"
+    } else {
+        "application/javascript"
+    };
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=86400"), // Cache for 1 day
+        ],
+        bytes.to_vec(),
+    )
+        .into_response())
+}
+
 // Track a view when video starts playing (called from player)
 pub async fn track_view(
     State(state): State<AppState>,
@@ -1856,12 +1900,18 @@ pub async fn get_player(
                     .clone()
                     .or_else(|| sub.language.clone())
                     .unwrap_or_else(|| format!("Track {}", sub.track_index));
-                let escaped_name = serde_json::to_string(&name)
-                   .unwrap_or_else(|_| r#""""#.to_string());
+                let escaped_name =
+                    serde_json::to_string(&name).unwrap_or_else(|_| r#""""#.to_string());
                 let default = if sub.is_default { "true" } else { "false" };
+                // Add file extension based on codec for libass to detect ASS files
+                let ext = match sub.codec.as_str() {
+                    "ass" | "ssa" => "ass",
+                    "subrip" | "srt" => "srt",
+                    _ => "ass",
+                };
                 format!(
-                    r#"{{ name: {}, url: "/api/videos/{}/subtitles/{}", default: {} }}"#,
-                    escaped_name, id, sub.track_index, default
+                    r#"{{ name: {}, url: "/api/videos/{}/subtitles/{}.{}", default: {} }}"#,
+                    escaped_name, id, sub.track_index, ext, default
                 )
             })
             .collect();
@@ -1881,10 +1931,11 @@ pub async fn get_player(
         String::new()
     };
 
-    // Build chapters array (only if chapters exist)
+    // Build chapters array (only if chapters exist) - filter invalid time points
     let chapters_js = if has_chapters {
         let chapter_config: Vec<String> = chapters
             .iter()
+            .filter(|ch| ch.start_time >= 0.0 && ch.end_time > ch.start_time)
             .map(|ch| {
                 format!(
                     r#"{{ start: {}, end: {}, title: {} }}"#,
@@ -1894,7 +1945,11 @@ pub async fn get_player(
                 )
             })
             .collect();
-        format!("const chapters = [{}];", chapter_config.join(", "))
+        if chapter_config.is_empty() {
+            String::new()
+        } else {
+            format!("const chapters = [{}];", chapter_config.join(", "))
+        }
     } else {
         String::new()
     };
@@ -1913,41 +1968,96 @@ pub async fn get_player(
         .to_string(),
     ];
 
-    if has_subtitles {
-        let fonts_param = if has_fonts { "fonts" } else { "[]" };
-        plugins.push(format!(
-            r#"artplayerPluginLibass({{
-                wasmUrl: 'https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.wasm',
-                workerUrl: 'https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.js',
-                fonts: {},
-                availableFonts: {{}},
-                fallbackFont: 'sans-serif',
-            }})"#,
-            fonts_param
-        ));
-    }
-
-    if has_multiple_subtitles {
-        plugins.push("artplayerPluginMultipleSubtitles({ subtitles: subtitles })".to_string());
-    }
+    // JASSUB is initialized separately after Artplayer is ready (not as a plugin)
+    // Subtitle switching is handled via Artplayer settings menu + JASSUB.setTrackByUrl()
 
     plugins.push("artplayerPluginAutoThumbnail({ width: 160, number: 100 })".to_string());
 
-    if has_chapters {
+    // Only add chapter plugin if we have valid chapters
+    let has_valid_chapters = has_chapters
+        && chapters
+            .iter()
+            .any(|ch| ch.start_time >= 0.0 && ch.end_time > ch.start_time);
+    if has_valid_chapters {
         plugins.push("artplayerPluginChapter({ chapters: chapters })".to_string());
     }
 
     let plugins_js = plugins.join(",\n            ");
 
-    // Build default subtitle loading code (only if subtitles exist)
-    let default_subtitle_js = if has_subtitles {
-        r#"
-        const defaultSub = subtitles.find(s => s.default) || subtitles[0];
-        if (defaultSub && defaultSub.url) {
-            art.plugins.artplayerPluginLibass?.switch(defaultSub.url);
-        }"#
+    // Build JASSUB initialization code (only if subtitles exist)
+    let default_sub = subtitles
+        .iter()
+        .find(|s| s.is_default)
+        .or_else(|| subtitles.first());
+    let jassub_init_js = if let Some(sub) = default_sub {
+        let ext = match sub.codec.as_str() {
+            "ass" | "ssa" => "ass",
+            "subrip" | "srt" => "srt",
+            _ => "ass",
+        };
+        let fonts_array = if has_fonts { "fonts" } else { "[]" };
+
+        // Build subtitle selector if multiple subtitles exist
+        let subtitle_selector = if has_multiple_subtitles {
+            r#"
+            // Add subtitle selector to settings
+            art.setting.add({
+                name: 'subtitle',
+                html: 'Subtitle',
+                tooltip: subtitles.find(s => s.default)?.name || subtitles[0]?.name || 'None',
+                selector: [
+                    { html: 'Off', value: null },
+                    ...subtitles.map(s => ({ html: s.name, url: s.url, default: s.default }))
+                ],
+                onSelect: function(item) {
+                    if (item.value === null) {
+                        // Turn off subtitles
+                        if (window.jassub) {
+                            window.jassub.freeTrack();
+                        }
+                    } else if (item.url && window.jassub) {
+                        window.jassub.setTrackByUrl(item.url);
+                    }
+                    return item.html;
+                },
+            });"#
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        format!(
+            r#"
+            // Initialize JASSUB for ASS subtitle rendering after Artplayer is ready
+            art.on('ready', function() {{
+                console.log('Artplayer ready, initializing JASSUB...');
+                console.log('Video element:', art.video);
+                console.log('subUrl:', '/api/videos/{video_id}/subtitles/{track_index}.{ext}');
+                console.log('fonts:', {fonts_array});
+                try {{
+                    window.jassub = new JASSUB({{
+                        video: art.video,
+                        subUrl: '/api/videos/{video_id}/subtitles/{track_index}.{ext}',
+                        workerUrl: '/jassub/jassub-worker.js',
+                        wasmUrl: '/jassub/jassub-worker.wasm',
+                        fonts: {fonts_array},
+                        fallbackFont: 'Arial',
+                        debug: true,
+                    }});
+                    console.log('JASSUB initialized:', window.jassub);
+                }} catch (e) {{
+                    console.error('JASSUB initialization error:', e);
+                }}
+                {subtitle_selector}
+            }});"#,
+            video_id = id,
+            track_index = sub.track_index,
+            ext = ext,
+            fonts_array = fonts_array,
+            subtitle_selector = subtitle_selector
+        )
     } else {
-        ""
+        String::new()
     };
 
     let js_code = format!(
@@ -2011,7 +2121,7 @@ pub async fn get_player(
                     }},
                 }},
             }});
-            {default_subtitle_js}
+            {jassub_init_js}
             art.on('play', onFirstPlay);
             art.on('error', onError);
             window.art = art;
@@ -2046,24 +2156,33 @@ pub async fn get_player(
         chapters_js = chapters_js,
         video_id = id,
         plugins_js = plugins_js,
-        default_subtitle_js = default_subtitle_js,
+        jassub_init_js = jassub_init_js,
     );
 
     // Minify the JavaScript code (with fallback if minifier panics on edge cases)
-    let js_to_use = {
+    let minified_js = {
         let js_clone = js_code.clone();
-        let result = panic::catch_unwind(|| {
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let session = Session::new();
             let mut out = Vec::new();
-            minify(&session, TopLevelMode::Global, js_clone.as_bytes(), &mut out).ok()?;
-            String::from_utf8(out).ok()
-        });
+            if minify(
+                &session,
+                TopLevelMode::Global,
+                js_clone.as_bytes(),
+                &mut out,
+            )
+            .is_ok()
+            {
+                String::from_utf8(out).ok()
+            } else {
+                None
+            }
+        }));
         match result {
             Ok(Some(minified)) => minified,
-            _ => js_code.clone(), // Fallback to unminified JS if minification fails
+            _ => js_code.clone(), // Fallback to unminified JS if minification fails or panics
         }
     };
-    let minified_js = js_to_use;
 
     // Build HTML with only the required script tags
     let mut scripts = vec![
@@ -2073,16 +2192,14 @@ pub async fn get_player(
     ];
 
     if has_subtitles {
-        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-libass/dist/artplayer-plugin-libass.min.js"></script>"#);
-    }
-
-    if has_multiple_subtitles {
-        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-multiple-subtitles/dist/artplayer-plugin-multiple-subtitles.min.js"></script>"#);
+        scripts.push(
+            r#"<script src="https://cdn.jsdelivr.net/npm/jassub/dist/jassub.umd.js"></script>"#,
+        );
     }
 
     scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-auto-thumbnail/dist/artplayer-plugin-auto-thumbnail.min.js"></script>"#);
 
-    if has_chapters {
+    if has_valid_chapters {
         scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-chapter/dist/artplayer-plugin-chapter.min.js"></script>"#);
     }
 
@@ -2095,7 +2212,12 @@ pub async fn get_player(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Video Player</title>
-    <style>body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }} #artplayer {{ width: 100%; height: 100%; }}</style>
+    <style>
+        body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }}
+        #artplayer {{ width: 100%; height: 100%; position: relative; }}
+        /* Ensure JASSUB canvas is visible above video */
+        #artplayer canvas {{ position: absolute; top: 0; left: 0; pointer-events: none; z-index: 10; }}
+    </style>
 </head>
 <body>
     <div id="artplayer"></div>

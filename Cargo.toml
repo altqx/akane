@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 axum = { version = "0.8.7", features = ["multipart"] }
-aws-sdk-s3 = { version = "1.115.0", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.116.0", features = ["behavior-version-latest"] }
 axiom = "0.2.1"
 regex = "1.12.2"
 tokio = { version = "1.48.0", features = ["full"] }
@@ -14,7 +14,7 @@ tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-uuid = { version = "1.18.1", features = ["v4"] }
+uuid = { version = "1.19.0", features = ["v4"] }
 anyhow = "1.0.100"
 tokio-stream = "0.1.17"
 serde_yaml = "0.9.34-deprecated"
@@ -28,6 +28,7 @@ minify-js = "0.6.0"
 async-stream = "0.3.6"
 clickhouse = { version = "0.14.1", features = [] }
 tokio-util = { version = "0.7.17", features = ["io"] }
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 
 [profile.release]
 lto = true

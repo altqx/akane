@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
         .route("/videos/{id}/view", post(handlers::track_view))
         .route("/videos/{id}/subtitles", get(handlers::get_video_subtitles))
         .route(
-            "/videos/{id}/subtitles/{track}",
+            "/videos/{id}/subtitles/{track_with_ext}",
             get(handlers::get_subtitle_file),
         )
         .route(
@@ -145,6 +145,7 @@ async fn main() -> Result<()> {
         .nest("/api", api_routes)
         .route("/hls/{id}/{*file}", get(handlers::get_hls_file))
         .route("/player/{id}", get(handlers::get_player))
+        .route("/jassub/{filename}", get(handlers::get_jassub_worker))
         .nest_service(
             "/admin-webui",
             ServeDir::new("webui")
