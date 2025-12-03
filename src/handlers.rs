@@ -32,6 +32,7 @@ use axum::{
 use futures::stream::Stream;
 use minify_js::{Session, TopLevelMode, minify};
 use std::collections::HashMap;
+use std::panic;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -2048,11 +2049,21 @@ pub async fn get_player(
         default_subtitle_js = default_subtitle_js,
     );
 
-    // Minify the JavaScript code
-    let session = Session::new();
-    let mut out = Vec::new();
-    minify(&session, TopLevelMode::Global, js_code.as_bytes(), &mut out).unwrap();
-    let minified_js = String::from_utf8(out).unwrap();
+    // Minify the JavaScript code (with fallback if minifier panics on edge cases)
+    let js_to_use = {
+        let js_clone = js_code.clone();
+        let result = panic::catch_unwind(|| {
+            let session = Session::new();
+            let mut out = Vec::new();
+            minify(&session, TopLevelMode::Global, js_clone.as_bytes(), &mut out).ok()?;
+            String::from_utf8(out).ok()
+        });
+        match result {
+            Ok(Some(minified)) => minified,
+            _ => js_code.clone(), // Fallback to unminified JS if minification fails
+        }
+    };
+    let minified_js = js_to_use;
 
     // Build HTML with only the required script tags
     let mut scripts = vec![
