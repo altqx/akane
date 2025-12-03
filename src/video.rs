@@ -229,7 +229,7 @@ pub async fn extract_subtitle(
         .arg("-i")
         .arg(input)
         .arg("-map")
-        .arg(format!("0:s:{}", subtitle_index))
+        .arg(format!("0:{}", subtitle_index))
         .arg("-c:s")
         .arg(format) // Keep original format (ass or srt)
         .arg(output_path)

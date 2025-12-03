@@ -285,14 +285,10 @@ pub async fn upload_video(
                 let sub_filename = format!("track_{}.{}", idx, ext);
                 let sub_path = subtitles_dir.join(&sub_filename);
 
-                // Use actual stream index from ffprobe for extraction
-                if let Err(e) = extract_subtitle(
-                    &video_path_clone,
-                    sub.stream_index,
-                    &sub_path,
-                    &sub.codec_name,
-                )
-                .await
+                // Use enumerate index (idx) as relative subtitle stream index
+                if let Err(e) =
+                    extract_subtitle(&video_path_clone, idx as i32, &sub_path, &sub.codec_name)
+                        .await
                 {
                     error!(
                         "Failed to extract subtitle stream {} (track {}): {}",
@@ -830,13 +826,9 @@ pub async fn finalize_chunked_upload(
                 let sub_path = subtitles_dir.join(&sub_filename);
 
                 // Use actual stream index from ffprobe for extraction
-                if let Err(e) = extract_subtitle(
-                    &video_path_clone,
-                    sub.stream_index,
-                    &sub_path,
-                    &sub.codec_name,
-                )
-                .await
+                if let Err(e) =
+                    extract_subtitle(&video_path_clone, idx as i32, &sub_path, &sub.codec_name)
+                        .await
                 {
                     error!(
                         "Failed to extract subtitle stream {} (track {}): {}",
@@ -1892,10 +1884,10 @@ pub async fn get_player(
             .iter()
             .map(|ch| {
                 format!(
-                    r#"{{ start: {}, end: {}, title: "{}" }}"#,
+                    r#"{{ start: {}, end: {}, title: {} }}"#,
                     ch.start_time,
                     ch.end_time,
-                    ch.title.replace('"', r#"\""#)
+                    serde_json::to_string(&ch.title).unwrap_or_else(|_| r#""""#.to_string())
                 )
             })
             .collect();
