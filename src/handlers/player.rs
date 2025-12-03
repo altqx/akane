@@ -127,8 +127,6 @@ pub async fn get_player(
         .to_string(),
     ];
 
-    plugins.push("artplayerPluginAutoThumbnail({ width: 160, number: 100 })".to_string());
-
     // Only add chapter plugin if we have valid chapters
     let has_valid_chapters = has_chapters
         && chapters
@@ -299,6 +297,11 @@ pub async fn get_player(
                 airplay: true,
                 theme: '#ff0000',
                 lang: 'en',
+                thumbnails: {{
+                    url: '/hls/{video_id}/sprites.jpg',
+                    number: 100,
+                    column: 10,
+                }},
                 moreVideoAttr: {{
                     crossOrigin: 'anonymous',
                 }},
@@ -399,8 +402,6 @@ pub async fn get_player(
             r#"<script src="https://cdn.jsdelivr.net/npm/jassub/dist/jassub.umd.js"></script>"#,
         );
     }
-
-    scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-auto-thumbnail/dist/artplayer-plugin-auto-thumbnail.min.js"></script>"#);
 
     if has_valid_chapters {
         scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-chapter/dist/artplayer-plugin-chapter.min.js"></script>"#);

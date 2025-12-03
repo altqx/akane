@@ -336,6 +336,7 @@ pub async fn encode_to_hls(
     upload_id: &str,
     semaphore: Arc<Semaphore>,
     encoder: &str,
+    duration: u32,
 ) -> Result<()> {
     fs::create_dir_all(out_dir).await?;
 
@@ -628,84 +629,43 @@ pub async fn encode_to_hls(
         encode_tasks.push(task);
     }
 
-    // Spawn thumbnail generation in parallel with encoding
+    // Spawn thumbnail sprite generation in parallel with encoding
+    // Generate 100 thumbnails in a 10x10 grid for seek preview
     let input_thumb = Arc::clone(&input);
     let out_dir_thumb = Arc::clone(&out_dir);
-    let video_codec_thumb = Arc::clone(&video_codec);
     let thumb_task = tokio::task::spawn(async move {
-        let thumb_path = out_dir_thumb.join("thumbnail.jpg");
-        info!("Generating thumbnail: {:?}", thumb_path);
+        let sprite_path = out_dir_thumb.join("sprites.jpg");
+        info!("Generating thumbnail sprite: {:?}", sprite_path);
+        let fps = if duration > 0 {
+            (100.0 / duration as f64).max(0.1).min(1.0)
+        } else {
+            0.5
+        };
 
-        let encoder_type = EncoderType::from_string(&video_codec_thumb);
+        let vf_filter = format!("fps={},scale=160:-1,tile=10x10", fps);
 
-        let mut thumb_cmd = Command::new("ffmpeg");
-        thumb_cmd
+        let thumb_output = Command::new("ffmpeg")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .arg("-loglevel")
             .arg("error")
-            .arg("-y");
-
-        // Hardware acceleration for thumbnail
-        match encoder_type {
-            EncoderType::Nvenc => {
-                thumb_cmd
-                    .arg("-hwaccel")
-                    .arg("cuda")
-                    .arg("-hwaccel_output_format")
-                    .arg("cuda");
-            }
-            EncoderType::Vaapi => {
-                thumb_cmd
-                    .arg("-hwaccel")
-                    .arg("vaapi")
-                    .arg("-hwaccel_output_format")
-                    .arg("vaapi")
-                    .arg("-vaapi_device")
-                    .arg("/dev/dri/renderD128");
-            }
-            EncoderType::Qsv => {
-                thumb_cmd
-                    .arg("-hwaccel")
-                    .arg("qsv")
-                    .arg("-hwaccel_output_format")
-                    .arg("qsv");
-            }
-            EncoderType::Cpu => {}
-        }
-
-        thumb_cmd
-            .arg("-ss")
-            .arg("0")
+            .arg("-y")
             .arg("-i")
             .arg(input_thumb.as_ref())
-            .arg("-vframes")
-            .arg("1");
-
-        // Download back to CPU for JPEG encoding if needed
-        match encoder_type {
-            EncoderType::Nvenc => {
-                thumb_cmd.arg("-vf").arg("hwdownload,format=nv12");
-            }
-            EncoderType::Vaapi => {
-                thumb_cmd.arg("-vf").arg("hwdownload,format=nv12");
-            }
-            EncoderType::Qsv => {
-                thumb_cmd.arg("-vf").arg("hwdownload,format=nv12");
-            }
-            EncoderType::Cpu => {}
-        }
-
-        thumb_cmd.arg("-q:v").arg("20").arg(&thumb_path);
-
-        let thumb_output = thumb_cmd
+            .arg("-vf")
+            .arg(&vf_filter)
+            .arg("-frames:v")
+            .arg("1")
+            .arg("-q:v")
+            .arg("5")
+            .arg(&sprite_path)
             .output()
             .await
-            .context("failed to generate thumbnail")?;
+            .context("failed to generate thumbnail sprite")?;
 
         if !thumb_output.status.success() {
             let stderr = String::from_utf8_lossy(&thumb_output.stderr);
-            error!("Thumbnail generation failed: {}", stderr);
+            error!("Thumbnail sprite generation failed: {}", stderr);
         }
 
         Ok::<_, anyhow::Error>(())

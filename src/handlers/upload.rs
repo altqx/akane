@@ -215,6 +215,7 @@ pub async fn upload_video(
                 &upload_id_clone,
                 state_clone.ffmpeg_semaphore.clone(),
                 &state_clone.config.video.encoder,
+                video_duration,
             )
             .await?;
 
@@ -277,7 +278,7 @@ pub async fn upload_video(
             let playlist_key =
                 upload_hls_to_r2(&state_clone, &hls_dir, &prefix, Some(&upload_id_clone)).await?;
 
-            let thumbnail_key = format!("{}/thumbnail.jpg", output_id);
+            let thumbnail_key = format!("{}/sprites.jpg", output_id);
             let entrypoint = playlist_key.clone();
 
             save_video(
@@ -732,6 +733,7 @@ pub async fn finalize_chunked_upload(
                 &upload_id_clone,
                 state_clone.ffmpeg_semaphore.clone(),
                 &state_clone.config.video.encoder,
+                video_duration,
             )
             .await?;
 
@@ -794,7 +796,7 @@ pub async fn finalize_chunked_upload(
             let playlist_key =
                 upload_hls_to_r2(&state_clone, &hls_dir, &prefix, Some(&upload_id_clone)).await?;
 
-            let thumbnail_key = format!("{}/thumbnail.jpg", output_id);
+            let thumbnail_key = format!("{}/sprites.jpg", output_id);
             let entrypoint = playlist_key.clone();
 
             save_video(
