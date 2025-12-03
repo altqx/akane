@@ -2062,23 +2062,23 @@ pub async fn get_player(
 
     // Build HTML with only the required script tags
     let mut scripts = vec![
-        r#"<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>"#,
-        r#"<script src="https://cdn.jsdelivr.net/npm/artplayer@5.2.1/dist/artplayer.min.js"></script>"#,
-        r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-hls-control@1.1.1/dist/artplayer-plugin-hls-control.min.js"></script>"#,
+        r#"<script src="https://cdn.jsdelivr.net/npm/hls.js/dist/hls.min.js"></script>"#,
+        r#"<script src="https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.min.js"></script>"#,
+        r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-hls-control/dist/artplayer-plugin-hls-control.min.js"></script>"#,
     ];
 
     if has_subtitles {
-        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-libass@1.0.3/dist/artplayer-plugin-libass.min.js"></script>"#);
+        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-libass/dist/artplayer-plugin-libass.min.js"></script>"#);
     }
 
     if has_multiple_subtitles {
-        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-multiple-subtitles@1.0.0/dist/artplayer-plugin-multiple-subtitles.min.js"></script>"#);
+        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-multiple-subtitles/dist/artplayer-plugin-multiple-subtitles.min.js"></script>"#);
     }
 
-    scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-auto-thumbnail@1.0.1/dist/artplayer-plugin-auto-thumbnail.min.js"></script>"#);
+    scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-auto-thumbnail/dist/artplayer-plugin-auto-thumbnail.min.js"></script>"#);
 
     if has_chapters {
-        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-chapter@1.0.1/dist/artplayer-plugin-chapter.min.js"></script>"#);
+        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-chapter/dist/artplayer-plugin-chapter.min.js"></script>"#);
     }
 
     let scripts_html = scripts.join("\n    ");
