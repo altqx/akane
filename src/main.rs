@@ -104,6 +104,19 @@ async fn main() -> Result<()> {
     let public_routes = Router::new()
         .route("/videos/{id}/heartbeat", post(handlers::heartbeat))
         .route("/videos/{id}/view", post(handlers::track_view))
+        .route("/videos/{id}/subtitles", get(handlers::get_video_subtitles))
+        .route(
+            "/videos/{id}/subtitles/{track}",
+            get(handlers::get_subtitle_file),
+        )
+        .route(
+            "/videos/{id}/attachments",
+            get(handlers::get_video_attachments),
+        )
+        .route(
+            "/videos/{id}/attachments/{filename}",
+            get(handlers::get_attachment_file),
+        )
         .route("/analytics/realtime", get(handlers::get_realtime_analytics))
         .route("/analytics/history", get(handlers::get_analytics_history))
         .route("/analytics/videos", get(handlers::get_analytics_videos))

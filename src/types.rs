@@ -1,6 +1,5 @@
 use crate::config::Config;
 use aws_sdk_s3::Client as S3Client;
-use clickhouse;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -139,4 +138,57 @@ pub struct ChunkUploadResponse {
 pub struct FinalizeUploadRequest {
     pub name: String,
     pub tags: Option<String>,
+}
+
+// Subtitle track metadata
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubtitleTrack {
+    pub id: i64,
+    pub video_id: String,
+    pub track_index: i32,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub codec: String,
+    pub storage_key: String,
+    pub is_default: bool,
+    pub is_forced: bool,
+}
+
+// Attachment metadata (fonts, etc.)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: i64,
+    pub video_id: String,
+    pub filename: String,
+    pub mimetype: String,
+    pub storage_key: String,
+}
+
+// FFprobe subtitle stream info
+#[derive(Clone, Debug)]
+pub struct SubtitleStreamInfo {
+    pub stream_index: i32, // Actual ffprobe stream index for extraction
+    pub codec_name: String,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub is_default: bool,
+    pub is_forced: bool,
+}
+
+// FFprobe attachment info (fonts embedded in MKV)
+#[derive(Clone, Debug)]
+pub struct AttachmentInfo {
+    pub filename: String,
+    pub mimetype: String,
+}
+
+// API response types
+#[derive(Serialize)]
+pub struct SubtitleListResponse {
+    pub subtitles: Vec<SubtitleTrack>,
+}
+
+#[derive(Serialize)]
+pub struct AttachmentListResponse {
+    pub attachments: Vec<Attachment>,
 }

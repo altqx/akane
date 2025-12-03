@@ -1,16 +1,20 @@
 use crate::clickhouse;
 use crate::database::{
     /*clear_database,*/ count_videos, delete_videos as db_delete_videos,
-    get_video_ids_with_prefix, list_videos as db_list_videos, save_video,
-    update_video as db_update_video,
+    get_attachment_by_filename, get_attachments_for_video, get_subtitle_by_track,
+    get_subtitles_for_video, get_video_ids_with_prefix, list_videos as db_list_videos,
+    save_attachment, save_subtitle, save_video, update_video as db_update_video,
 };
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
-    AppState, ChunkUploadResponse, ChunkedUpload, FinalizeUploadRequest, ProgressMap,
-    ProgressResponse, ProgressUpdate, QueueItem, QueueListResponse, UploadAccepted, UploadResponse,
-    VideoListResponse, VideoQuery,
+    AppState, AttachmentListResponse, ChunkUploadResponse, ChunkedUpload, FinalizeUploadRequest,
+    ProgressMap, ProgressResponse, ProgressUpdate, QueueItem, QueueListResponse,
+    SubtitleListResponse, UploadAccepted, UploadResponse, VideoListResponse, VideoQuery,
 };
-use crate::video::{encode_to_hls, get_variants_for_height, get_video_duration, get_video_height};
+use crate::video::{
+    encode_to_hls, extract_all_attachments, extract_subtitle, get_attachments,
+    get_subtitle_streams, get_variants_for_height, get_video_duration, get_video_height,
+};
 use futures::StreamExt;
 // use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use axum::{
@@ -33,7 +37,7 @@ use tokio::{fs, io::AsyncReadExt, io::AsyncWriteExt};
 use tracing::{error, info};
 use uuid::Uuid;
 
-/// Get current timestamp in milliseconds
+// Get current timestamp in milliseconds
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -41,7 +45,7 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
-/// Helper to update progress while preserving the original created_at timestamp
+// Helper to update progress while preserving the original created_at timestamp
 async fn update_progress(progress_map: &ProgressMap, upload_id: &str, mut update: ProgressUpdate) {
     let mut map = progress_map.write().await;
     // Preserve the original created_at if the entry exists
@@ -250,6 +254,51 @@ pub async fn upload_video(
             )
             .await?;
 
+            // Extract subtitles and attachments from the source video
+            let subtitle_streams = get_subtitle_streams(&video_path_clone)
+                .await
+                .unwrap_or_default();
+            let attachment_streams = get_attachments(&video_path_clone).await.unwrap_or_default();
+
+            // Create directories for subtitles and fonts
+            let subtitles_dir = hls_dir.join("subtitles");
+            let fonts_dir = hls_dir.join("fonts");
+
+            if !subtitle_streams.is_empty() {
+                fs::create_dir_all(&subtitles_dir).await?;
+            }
+            if !attachment_streams.is_empty() {
+                fs::create_dir_all(&fonts_dir).await?;
+                // Extract all font attachments
+                extract_all_attachments(&video_path_clone, &fonts_dir).await?;
+            }
+
+            // Extract each subtitle stream
+            for (idx, sub) in subtitle_streams.iter().enumerate() {
+                let ext = match sub.codec_name.as_str() {
+                    "ass" | "ssa" => "ass",
+                    "subrip" | "srt" => "srt",
+                    _ => "ass", // Default to ASS
+                };
+                let sub_filename = format!("track_{}.{}", idx, ext);
+                let sub_path = subtitles_dir.join(&sub_filename);
+
+                // Use actual stream index from ffprobe for extraction
+                if let Err(e) = extract_subtitle(
+                    &video_path_clone,
+                    sub.stream_index,
+                    &sub_path,
+                    &sub.codec_name,
+                )
+                .await
+                {
+                    error!(
+                        "Failed to extract subtitle stream {} (track {}): {}",
+                        sub.stream_index, idx, e
+                    );
+                }
+            }
+
             // Update progress: Upload to R2 stage
             let upload_progress = ProgressUpdate {
                 stage: "Upload to R2".to_string(),
@@ -286,6 +335,52 @@ pub async fn upload_video(
                 &entrypoint,
             )
             .await?;
+
+            // Save subtitle metadata to database
+            for (idx, sub) in subtitle_streams.iter().enumerate() {
+                let ext = match sub.codec_name.as_str() {
+                    "ass" | "ssa" => "ass",
+                    "subrip" | "srt" => "srt",
+                    _ => "ass",
+                };
+                let storage_key = format!("{}/subtitles/track_{}.{}", output_id, idx, ext);
+
+                if let Err(e) = save_subtitle(
+                    &state_clone.db_pool,
+                    &output_id,
+                    idx as i32,
+                    sub.language.as_deref(),
+                    sub.title.as_deref(),
+                    &sub.codec_name,
+                    &storage_key,
+                    sub.is_default,
+                    sub.is_forced,
+                )
+                .await
+                {
+                    error!("Failed to save subtitle metadata for track {}: {}", idx, e);
+                }
+            }
+
+            // Save attachment metadata to database
+            for att in &attachment_streams {
+                let storage_key = format!("{}/fonts/{}", output_id, att.filename);
+
+                if let Err(e) = save_attachment(
+                    &state_clone.db_pool,
+                    &output_id,
+                    &att.filename,
+                    &att.mimetype,
+                    &storage_key,
+                )
+                .await
+                {
+                    error!(
+                        "Failed to save attachment metadata for {}: {}",
+                        att.filename, e
+                    );
+                }
+            }
 
             // Cleanup (ignore errors)
             let _ = fs::remove_file(&video_path_clone).await;
@@ -337,10 +432,10 @@ pub async fn upload_video(
         // Clean up completed/failed progress entries after 10 seconds
         tokio::time::sleep(Duration::from_secs(10)).await;
         let mut progress_map = state_clone.progress.write().await;
-        if let Some(entry) = progress_map.get(&upload_id_clone) {
-            if entry.status == "completed" || entry.status == "failed" {
-                progress_map.remove(&upload_id_clone);
-            }
+        if let Some(entry) = progress_map.get(&upload_id_clone)
+            && (entry.status == "completed" || entry.status == "failed")
+        {
+            progress_map.remove(&upload_id_clone);
         }
     });
 
@@ -350,7 +445,7 @@ pub async fn upload_video(
     }))
 }
 
-/// Handle chunked upload - receives individual chunks of a large file
+// Handle chunked upload - receives individual chunks of a large file
 pub async fn upload_chunk(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -528,7 +623,7 @@ pub async fn upload_chunk(
     }))
 }
 
-/// Finalize chunked upload - assembles chunks and starts processing
+// Finalize chunked upload - assembles chunks and starts processing
 pub async fn finalize_chunked_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -686,6 +781,51 @@ pub async fn finalize_chunked_upload(
             )
             .await?;
 
+            // Extract subtitles and attachments from the source video
+            let subtitle_streams = get_subtitle_streams(&video_path_clone)
+                .await
+                .unwrap_or_default();
+            let attachment_streams = get_attachments(&video_path_clone).await.unwrap_or_default();
+
+            // Create directories for subtitles and fonts
+            let subtitles_dir = hls_dir.join("subtitles");
+            let fonts_dir = hls_dir.join("fonts");
+
+            if !subtitle_streams.is_empty() {
+                fs::create_dir_all(&subtitles_dir).await?;
+            }
+            if !attachment_streams.is_empty() {
+                fs::create_dir_all(&fonts_dir).await?;
+                // Extract all font attachments
+                extract_all_attachments(&video_path_clone, &fonts_dir).await?;
+            }
+
+            // Extract each subtitle stream
+            for (idx, sub) in subtitle_streams.iter().enumerate() {
+                let ext = match sub.codec_name.as_str() {
+                    "ass" | "ssa" => "ass",
+                    "subrip" | "srt" => "srt",
+                    _ => "ass", // Default to ASS
+                };
+                let sub_filename = format!("track_{}.{}", idx, ext);
+                let sub_path = subtitles_dir.join(&sub_filename);
+
+                // Use actual stream index from ffprobe for extraction
+                if let Err(e) = extract_subtitle(
+                    &video_path_clone,
+                    sub.stream_index,
+                    &sub_path,
+                    &sub.codec_name,
+                )
+                .await
+                {
+                    error!(
+                        "Failed to extract subtitle stream {} (track {}): {}",
+                        sub.stream_index, idx, e
+                    );
+                }
+            }
+
             let upload_progress = ProgressUpdate {
                 stage: "Upload to R2".to_string(),
                 current_chunk: 0,
@@ -718,6 +858,52 @@ pub async fn finalize_chunked_upload(
                 &entrypoint,
             )
             .await?;
+
+            // Save subtitle metadata to database
+            for (idx, sub) in subtitle_streams.iter().enumerate() {
+                let ext = match sub.codec_name.as_str() {
+                    "ass" | "ssa" => "ass",
+                    "subrip" | "srt" => "srt",
+                    _ => "ass",
+                };
+                let storage_key = format!("{}/subtitles/track_{}.{}", output_id, idx, ext);
+
+                if let Err(e) = save_subtitle(
+                    &state_clone.db_pool,
+                    &output_id,
+                    idx as i32,
+                    sub.language.as_deref(),
+                    sub.title.as_deref(),
+                    &sub.codec_name,
+                    &storage_key,
+                    sub.is_default,
+                    sub.is_forced,
+                )
+                .await
+                {
+                    error!("Failed to save subtitle metadata for track {}: {}", idx, e);
+                }
+            }
+
+            // Save attachment metadata to database
+            for att in &attachment_streams {
+                let storage_key = format!("{}/fonts/{}", output_id, att.filename);
+
+                if let Err(e) = save_attachment(
+                    &state_clone.db_pool,
+                    &output_id,
+                    &att.filename,
+                    &att.mimetype,
+                    &storage_key,
+                )
+                .await
+                {
+                    error!(
+                        "Failed to save attachment metadata for {}: {}",
+                        att.filename, e
+                    );
+                }
+            }
 
             let _ = fs::remove_file(&video_path_clone).await;
             let _ = fs::remove_dir_all(&hls_dir).await;
@@ -767,10 +953,10 @@ pub async fn finalize_chunked_upload(
         // Clean up completed/failed progress entries after 10 seconds
         tokio::time::sleep(Duration::from_secs(10)).await;
         let mut progress_map = state_clone.progress.write().await;
-        if let Some(entry) = progress_map.get(&upload_id_clone) {
-            if entry.status == "completed" || entry.status == "failed" {
-                progress_map.remove(&upload_id_clone);
-            }
+        if let Some(entry) = progress_map.get(&upload_id_clone)
+            && (entry.status == "completed" || entry.status == "failed")
+        {
+            progress_map.remove(&upload_id_clone);
         }
     });
 
@@ -834,9 +1020,14 @@ pub async fn cancel_queue(
     if let Some(progress) = progress_map.get(&upload_id) {
         // Only allow cancellation of items that are "initializing" or in early "processing" stages
         // We cannot cancel items that are actively being encoded by FFmpeg
-        let cancellable_stages = ["Initializing upload", "Queued for processing", "Receiving chunks"];
+        let cancellable_stages = [
+            "Initializing upload",
+            "Queued for processing",
+            "Receiving chunks",
+        ];
         let is_cancellable = progress.status == "initializing"
-            || (progress.status == "processing" && cancellable_stages.contains(&progress.stage.as_str()));
+            || (progress.status == "processing"
+                && cancellable_stages.contains(&progress.stage.as_str()));
 
         if !is_cancellable {
             return Err((
@@ -964,7 +1155,7 @@ pub async fn list_videos(
 
     let total = count_videos(&state.db_pool, &filters)
         .await
-        .map_err(|e| internal_err(e))?;
+        .map_err(internal_err)?;
 
     let items = db_list_videos(
         &state.db_pool,
@@ -975,13 +1166,13 @@ pub async fn list_videos(
         &HashMap::new(), // View counts are fetched separately from ClickHouse below
     )
     .await
-    .map_err(|e| internal_err(e))?;
+    .map_err(internal_err)?;
 
     // Optimization: Fetch view counts for the returned videos only
     let video_ids: Vec<String> = items.iter().map(|v| v.id.clone()).collect();
     let view_counts = clickhouse::get_view_counts(&state.clickhouse, &video_ids)
         .await
-        .map_err(|e| internal_err(e))?;
+        .map_err(internal_err)?;
 
     // Update items with view counts
     let items = items
@@ -1077,7 +1268,7 @@ pub async fn get_analytics_history(
 ) -> Result<Json<Vec<crate::clickhouse::HistoryItem>>, (StatusCode, String)> {
     let history = crate::clickhouse::get_analytics_history(&state.clickhouse)
         .await
-        .map_err(|e| internal_err(e))?;
+        .map_err(internal_err)?;
     Ok(Json(history))
 }
 
@@ -1096,12 +1287,12 @@ pub async fn get_analytics_videos(
     let mut videos =
         crate::database::get_all_videos_summary(&state.db_pool, &HashMap::new(), Some(100))
             .await
-            .map_err(|e| internal_err(e))?;
+            .map_err(internal_err)?;
 
     let video_ids: Vec<String> = videos.iter().map(|v| v.id.clone()).collect();
     let view_counts = clickhouse::get_view_counts(&state.clickhouse, &video_ids)
         .await
-        .map_err(|e| internal_err(e))?;
+        .map_err(internal_err)?;
 
     for video in &mut videos {
         if let Some(&count) = view_counts.get(&video.id) {
@@ -1147,10 +1338,7 @@ pub async fn delete_videos(
     Json(body): Json<DeleteVideosRequest>,
 ) -> Result<Json<DeleteVideosResponse>, (StatusCode, String)> {
     if body.ids.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "No video IDs provided".to_string(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "No video IDs provided".to_string()));
     }
 
     info!("Deleting {} videos: {:?}", body.ids.len(), body.ids);
@@ -1158,7 +1346,7 @@ pub async fn delete_videos(
     // First, verify videos exist and get their IDs (also acts as validation)
     let existing_ids = get_video_ids_with_prefix(&state.db_pool, &body.ids)
         .await
-        .map_err(|e| internal_err(e))?;
+        .map_err(internal_err)?;
 
     if existing_ids.is_empty() {
         return Err((StatusCode::NOT_FOUND, "No videos found".to_string()));
@@ -1208,7 +1396,7 @@ pub async fn delete_videos(
     // Delete from database
     let deleted = db_delete_videos(&state.db_pool, &existing_ids)
         .await
-        .map_err(|e| internal_err(e))?;
+        .map_err(internal_err)?;
 
     Ok(Json(DeleteVideosResponse {
         deleted,
@@ -1370,12 +1558,9 @@ pub async fn get_hls_file(
 ) -> Result<Response, (StatusCode, String)> {
     let key = format!("{}/{}", id, file);
 
-    // Verify token for ALL HLS files (.m3u8, .ts, .vtt, .srt)
-    if file.ends_with(".m3u8")
-        || file.ends_with(".ts")
-        || file.ends_with(".vtt")
-        || file.ends_with(".srt")
-    {
+    // Verify token for HLS files (.m3u8, .ts)
+    // Subtitles and fonts are now served through dedicated API endpoints
+    if file.ends_with(".m3u8") || file.ends_with(".ts") {
         // Extract token from Cookie header
         let cookie_header = headers
             .get(header::COOKIE)
@@ -1429,9 +1614,8 @@ pub async fn get_hls_file(
 
     // Convert Byte stream to Frame stream for Axum Body
     let body_stream = stream.map(|result| {
-        result
-            .map(|bytes| axum::body::Bytes::from(bytes)) // Ensure it's Bytes
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        result // Ensure it's Bytes
+            .map_err(std::io::Error::other)
     });
 
     let body = Body::from_stream(body_stream);
@@ -1441,10 +1625,8 @@ pub async fn get_hls_file(
         "application/vnd.apple.mpegurl"
     } else if file.ends_with(".ts") {
         "video/mp2t"
-    } else if file.ends_with(".vtt") {
-        "text/vtt"
-    } else if file.ends_with(".srt") {
-        "text/plain" // or application/x-subrip
+    } else if file.ends_with(".jpg") || file.ends_with(".jpeg") {
+        "image/jpeg"
     } else {
         "application/octet-stream"
     };
@@ -1452,7 +1634,109 @@ pub async fn get_hls_file(
     Ok(([(header::CONTENT_TYPE, content_type)], body).into_response())
 }
 
-/// Track a view when video starts playing (called from player)
+// Get list of subtitles for a video
+pub async fn get_video_subtitles(
+    State(state): State<AppState>,
+    Path(video_id): Path<String>,
+) -> Result<Json<SubtitleListResponse>, (StatusCode, String)> {
+    let subtitles = get_subtitles_for_video(&state.db_pool, &video_id)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(Json(SubtitleListResponse { subtitles }))
+}
+
+// Get a specific subtitle file
+pub async fn get_subtitle_file(
+    State(state): State<AppState>,
+    Path((video_id, track_index)): Path<(String, i32)>,
+) -> Result<Response, (StatusCode, String)> {
+    let subtitle = get_subtitle_by_track(&state.db_pool, &video_id, track_index)
+        .await
+        .map_err(internal_err)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Subtitle not found".to_string()))?;
+
+    // Fetch from R2
+    let content = state
+        .s3
+        .get_object()
+        .bucket(&state.config.r2.bucket)
+        .key(&subtitle.storage_key)
+        .send()
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+    let reader = content.body.into_async_read();
+    let stream = tokio_util::io::ReaderStream::new(reader);
+    let body_stream = stream.map(|result| result.map_err(std::io::Error::other));
+    let body = Body::from_stream(body_stream);
+
+    // Determine content type based on codec
+    let content_type = match subtitle.codec.as_str() {
+        "ass" | "ssa" => "text/x-ssa",
+        "subrip" | "srt" => "text/plain",
+        _ => "text/plain",
+    };
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+// Get list of attachments (fonts) for a video
+pub async fn get_video_attachments(
+    State(state): State<AppState>,
+    Path(video_id): Path<String>,
+) -> Result<Json<AttachmentListResponse>, (StatusCode, String)> {
+    let attachments = get_attachments_for_video(&state.db_pool, &video_id)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(Json(AttachmentListResponse { attachments }))
+}
+
+// Get a specific attachment file (font)
+pub async fn get_attachment_file(
+    State(state): State<AppState>,
+    Path((video_id, filename)): Path<(String, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    let attachment = get_attachment_by_filename(&state.db_pool, &video_id, &filename)
+        .await
+        .map_err(internal_err)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Attachment not found".to_string()))?;
+
+    // Fetch from R2
+    let content = state
+        .s3
+        .get_object()
+        .bucket(&state.config.r2.bucket)
+        .key(&attachment.storage_key)
+        .send()
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+    let reader = content.body.into_async_read();
+    let stream = tokio_util::io::ReaderStream::new(reader);
+    let body_stream = stream.map(|result| result.map_err(std::io::Error::other));
+    let body = Body::from_stream(body_stream);
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, attachment.mimetype.as_str()),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::CACHE_CONTROL, "public, max-age=31536000"), // Cache fonts for 1 year
+        ],
+        body,
+    )
+        .into_response())
+}
+
+// Track a view when video starts playing (called from player)
 pub async fn track_view(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -1505,46 +1789,144 @@ pub async fn get_player(
     // Generate token (view is now tracked on first play, not page load)
     let token = generate_token(&id, &state.config.server.secret_key, &ip, user_agent);
 
+    // Fetch subtitles and attachments for this video
+    let subtitles = get_subtitles_for_video(&state.db_pool, &id)
+        .await
+        .unwrap_or_default();
+    let attachments = get_attachments_for_video(&state.db_pool, &id)
+        .await
+        .unwrap_or_default();
+
+    // Build subtitle configuration for ArtPlayer
+    let subtitle_config: Vec<String> = subtitles
+        .iter()
+        .map(|sub| {
+            let name = sub
+                .title
+                .clone()
+                .or_else(|| sub.language.clone())
+                .unwrap_or_else(|| format!("Track {}", sub.track_index));
+            let default = if sub.is_default { "true" } else { "false" };
+            format!(
+                r#"{{ name: "{}", url: "/api/videos/{}/subtitles/{}", default: {} }}"#,
+                name, id, sub.track_index, default
+            )
+        })
+        .collect();
+
+    // Build font URLs for libass
+    let font_urls: Vec<String> = attachments
+        .iter()
+        .map(|att| format!(r#""/api/videos/{}/attachments/{}""#, id, att.filename))
+        .collect();
+
     let js_code = format!(
         r#"
         let viewTracked = false;
         let heartbeatStarted = false;
+        let art = null;
 
         async function init() {{
-            const video = document.getElementById('video');
-            const ui = video['ui'];
-            const controls = ui.getControls();
-            const player = controls.getPlayer();
-            const config = {{
-                'controlPanelElements': ['play_pause', 'time_and_duration', 'spacer', 'mute', 'volume', 'fullscreen', 'overflow_menu'],
-                'overflowMenuButtons': ['quality', 'playback_rate', 'captions', 'picture_in_picture', 'cast'],
-                'seekBarColors': {{
-                    base: 'rgba(255, 255, 255, 0.3)',
-                    buffered: 'rgba(255, 255, 255, 0.54)',
-                    played: 'rgb(255, 0, 0)',
-                }}
-            }};
+            const subtitles = [{subtitle_list}];
+            const fonts = [{font_list}];
             
-            ui.configure(config);
-            window.player = player;
-            window.ui = ui;
-            player.addEventListener('error', onErrorEvent);
+            // Initialize ArtPlayer with HLS and libass plugins
+            art = new Artplayer({{
+                container: '#artplayer',
+                url: '/hls/{video_id}/index.m3u8',
+                type: 'm3u8',
+                autoplay: true,
+                autoSize: false,
+                autoMini: false,
+                loop: false,
+                flip: true,
+                playbackRate: true,
+                aspectRatio: true,
+                setting: true,
+                hotkey: true,
+                pip: true,
+                mutex: true,
+                fullscreen: true,
+                fullscreenWeb: true,
+                subtitleOffset: true,
+                miniProgressBar: true,
+                localVideo: false,
+                localSubtitle: false,
+                volume: 1,
+                isLive: false,
+                muted: false,
+                autoPlayback: true,
+                airplay: true,
+                theme: '#ff0000',
+                lang: 'en',
+                moreVideoAttr: {{
+                    crossOrigin: 'anonymous',
+                }},
+                plugins: [
+                    artplayerPluginHlsControl({{
+                        quality: {{
+                            control: true,
+                            setting: true,
+                            getName: (level) => level.height + 'P',
+                            title: 'Quality',
+                            auto: 'Auto',
+                        }},
+                    }}),
+                    ...(subtitles.length > 0 ? [artplayerPluginLibass({{
+                        // libass WASM files - using jsDelivr CDN
+                        wasmUrl: 'https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.wasm',
+                        workerUrl: 'https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.js',
+                        fonts: fonts,
+                        availableFonts: {{}},
+                        fallbackFont: 'sans-serif',
+                    }})] : []),
+                    ...(subtitles.length > 1 ? [artplayerPluginMultipleSubtitles({{
+                        subtitles: subtitles,
+                    }})] : []),
+                    // Auto-generate thumbnails for progress bar preview
+                    artplayerPluginAutoThumbnail({{
+                        width: 160,
+                        number: 100,
+                    }}),
+                ],
+                customType: {{
+                    m3u8: function playM3u8(video, url, art) {{
+                        if (Hls.isSupported()) {{
+                            if (art.hls) art.hls.destroy();
+                            const hls = new Hls();
+                            hls.loadSource(url);
+                            hls.attachMedia(video);
+                            art.hls = hls;
+                            art.on('destroy', () => hls.destroy());
+                        }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+                            video.src = url;
+                        }} else {{
+                            art.notice.show = 'Unsupported playback format: m3u8';
+                        }}
+                    }},
+                }},
+            }});
+
+            // Load default subtitle if available - libass handles ASS/SSA rendering
+            if (subtitles.length > 0) {{
+                const defaultSub = subtitles.find(s => s.default) || subtitles[0];
+                if (defaultSub && defaultSub.url) {{
+                    // libass plugin will handle the subtitle loading
+                    art.plugins.artplayerPluginLibass?.switch(defaultSub.url);
+                }}
+            }}
 
             // Track view and start heartbeat on first play
-            video.addEventListener('play', onFirstPlay);
+            art.on('play', onFirstPlay);
+            art.on('error', onError);
 
-            try {{
-                await player.load('/hls/{}/index.m3u8');
-            }} catch (e) {{
-                onError(e);
-            }}
+            window.art = art;
         }}
 
         function onFirstPlay() {{
             if (!viewTracked) {{
                 viewTracked = true;
-                // Track the view
-                fetch('/api/videos/{}/view', {{ method: 'POST' }});
+                fetch('/api/videos/{video_id}/view', {{ method: 'POST' }});
             }}
             if (!heartbeatStarted) {{
                 heartbeatStarted = true;
@@ -1553,30 +1935,21 @@ pub async fn get_player(
         }}
 
         function startHeartbeat() {{
-            // Send initial heartbeat immediately
-            fetch('/api/videos/{}/heartbeat', {{ method: 'POST' }});
-            // Then continue every 10 seconds
+            fetch('/api/videos/{video_id}/heartbeat', {{ method: 'POST' }});
             setInterval(() => {{
-                fetch('/api/videos/{}/heartbeat', {{ method: 'POST' }});
+                fetch('/api/videos/{video_id}/heartbeat', {{ method: 'POST' }});
             }}, 10000);
         }}
 
-        function onErrorEvent(event) {{
-            onError(event.detail);
-        }}
-
         function onError(error) {{
-            console.error('Error code', error.code, 'object', error);
+            console.error('Player error:', error);
         }}
 
-        document.addEventListener('shaka-ui-loaded', init);
-        document.addEventListener('shaka-ui-load-failed', initFailed);
-
-        function initFailed() {{
-            console.error('Unable to load the UI library!');
-        }}
+        document.addEventListener('DOMContentLoaded', init);
         "#,
-        id, id, id, id
+        subtitle_list = subtitle_config.join(", "),
+        font_list = font_urls.join(", "),
+        video_id = id,
     );
 
     let session = Session::new();
@@ -1592,20 +1965,27 @@ pub async fn get_player(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Video Player</title>
-    <!-- Shaka Player UI CSS -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.11/controls.min.css" />
+    <!-- ArtPlayer CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/artplayer@5.2.1/dist/artplayer.css" />
     <style>
         body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }}
-        #video-container {{ width: 100%; height: 100%; }}
-        #video {{ width: 100%; height: 100%; }}
+        #artplayer {{ width: 100%; height: 100%; }}
     </style>
-    <!-- Shaka Player UI JS -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.11/shaka-player.ui.min.js"></script>
 </head>
 <body>
-    <div id="video-container" data-shaka-player-container>
-        <video id="video" autoplay data-shaka-player></video>
-    </div>
+    <div id="artplayer"></div>
+    <!-- HLS.js for HLS playback -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+    <!-- ArtPlayer -->
+    <script src="https://cdn.jsdelivr.net/npm/artplayer@5.2.1/dist/artplayer.min.js"></script>
+    <!-- ArtPlayer HLS Control Plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-hls-control@1.1.1/dist/artplayer-plugin-hls-control.min.js"></script>
+    <!-- ArtPlayer Libass Plugin for ASS subtitles -->
+    <script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-libass@1.0.3/dist/artplayer-plugin-libass.min.js"></script>
+    <!-- ArtPlayer Multiple Subtitles Plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-multiple-subtitles@1.0.0/dist/artplayer-plugin-multiple-subtitles.min.js"></script>
+    <!-- ArtPlayer Auto Thumbnail Plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-auto-thumbnail@1.0.1/dist/artplayer-plugin-auto-thumbnail.min.js"></script>
     <script>{}</script>
 </body>
 </html>
