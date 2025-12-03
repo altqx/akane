@@ -1,5 +1,5 @@
 use crate::database::{get_attachments_for_video, get_chapters_for_video, get_subtitles_for_video};
-use crate::handlers::common::{generate_token, internal_err, minify_js_simple, verify_token};
+use crate::handlers::common::{generate_token, internal_err, minify_js, verify_token};
 use crate::types::AppState;
 
 use axum::{
@@ -388,7 +388,7 @@ pub async fn get_player(
     );
 
     // Simple regex-based JS minification (safe, no panics)
-    let minified_js = minify_js_simple(&js_code);
+    let minified_js = minify_js(&js_code);
 
     // Build HTML with only the required script tags
     let mut scripts = vec![

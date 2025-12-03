@@ -11,7 +11,7 @@ pub use analytics::{
 };
 
 #[allow(unused)]
-pub use common::{internal_err, minify_js_simple};
+pub use common::{internal_err, minify_js};
 pub use content::{
     get_attachment_file, get_jassub_worker, get_subtitle_file, get_video_attachments,
     get_video_chapters, get_video_subtitles,

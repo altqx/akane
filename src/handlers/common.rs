@@ -21,7 +21,7 @@ pub fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
-pub fn minify_js_simple(code: &str) -> String {
+pub fn minify_js(code: &str) -> String {
     // First pass: tokenize and remove whitespace/comments
     let minified = minify_pass_one(code);
 
@@ -1245,70 +1245,70 @@ mod tests {
     #[test]
     fn test_minify_removes_whitespace() {
         let input = "function test() {\n    return 1;\n}";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "function test(){return 1}");
     }
 
     #[test]
     fn test_minify_removes_single_line_comments() {
         let input = "let x = 1; // comment\nlet y = 2;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "let x=1;let y=2");
     }
 
     #[test]
     fn test_minify_removes_multi_line_comments() {
         let input = "let x = /* comment */ 1;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "let x=1");
     }
 
     #[test]
     fn test_minify_preserves_strings() {
         let input = r#"let x = "hello world";"#;
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, r#"let x="hello world""#);
     }
 
     #[test]
     fn test_minify_preserves_single_quote_strings() {
         let input = "let x = 'hello world';";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "let x='hello world'");
     }
 
     #[test]
     fn test_minify_preserves_template_literals() {
         let input = "let x = `hello ${name}`;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "let x=`hello ${name}`");
     }
 
     #[test]
     fn test_minify_preserves_regex() {
         let input = "let r = /test/gi;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "let r=/test/gi");
     }
 
     #[test]
     fn test_minify_boolean_true() {
         let input = "let x = true;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "let x=!0");
     }
 
     #[test]
     fn test_minify_boolean_false() {
         let input = "let x = false;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "let x=!1");
     }
 
     #[test]
     fn test_minify_preserves_boolean_in_strings() {
         let input = r#"let x = "true";"#;
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, r#"let x="true""#);
     }
 
@@ -1316,7 +1316,7 @@ mod tests {
     fn test_minify_renames_long_variables() {
         // Variable names longer than 1 char get renamed to shorter names
         let input = "let trueValue = 1;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         // trueValue is renamed to 'a' (first short name)
         assert_eq!(result, "let a=1");
     }
@@ -1325,42 +1325,42 @@ mod tests {
     fn test_minify_preserves_short_variables() {
         // Single char variable names are not renamed
         let input = "let x = 1;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "let x=1");
     }
 
     #[test]
     fn test_minify_removes_semicolon_before_brace() {
         let input = "function test() { return 1; }";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "function test(){return 1}");
     }
 
     #[test]
     fn test_minify_preserves_space_for_keywords() {
         let input = "return x;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "return x");
     }
 
     #[test]
     fn test_minify_preserves_space_between_operators() {
         let input = "let x = a + +b;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "let x=a+ +b");
     }
 
     #[test]
     fn test_minify_removes_multiple_semicolons() {
         let input = "let x = 1;;let y = 2;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "let x=1;let y=2");
     }
 
     #[test]
     fn test_minify_preserves_escaped_strings() {
         let input = r#"let x = "hello \"world\"";"#;
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, r#"let x="hello \"world\"""#);
     }
 
@@ -1375,7 +1375,7 @@ mod tests {
                 }
             }
         "#;
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         // viewTracked is renamed to 'a', booleans replaced with !0/!1
         assert!(
             result.contains("a=!1"),
@@ -1395,7 +1395,7 @@ mod tests {
     #[test]
     fn test_minify_preserves_return_regex() {
         let input = "function test() { return /abc/; }";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert_eq!(result, "function test(){return /abc/}");
     }
 
@@ -1403,7 +1403,7 @@ mod tests {
     fn test_minify_preserves_property_access() {
         // Property accesses should NOT be renamed
         let input = "let myVar = obj.myProperty;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         // myVar renamed to 'a', but myProperty stays the same (property access)
         assert!(
             result.contains(".myProperty"),
@@ -1421,7 +1421,7 @@ mod tests {
     fn test_minify_preserves_object_keys() {
         // Object keys should NOT be renamed
         let input = "let myObj = { myKey: 1 };";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert!(
             result.contains("myKey:"),
             "Object key should be preserved: {}",
@@ -1433,7 +1433,7 @@ mod tests {
     fn test_minify_preserves_globals() {
         // Global APIs should NOT be renamed
         let input = "let myVar = document.getElementById('test');";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         assert!(
             result.contains("document"),
             "document should not be renamed: {}",
@@ -1450,7 +1450,7 @@ mod tests {
     fn test_minify_multiple_variables() {
         // Multiple variables should get sequential short names
         let input = "let firstVar = 1; let secondVar = 2; let thirdVar = firstVar + secondVar;";
-        let result = minify_js_simple(input);
+        let result = minify_js(input);
         // Should be much shorter
         assert!(
             result.len() < input.len(),
