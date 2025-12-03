@@ -1522,6 +1522,11 @@ pub async fn get_analytics_videos(
 }
 
 #[derive(serde::Deserialize)]
+pub struct TokenQuery {
+    pub token: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 pub struct UpdateVideoRequest {
     pub name: String,
     pub tags: Vec<String>,
@@ -1842,8 +1847,54 @@ pub async fn get_hls_file(
 // Get list of subtitles for a video
 pub async fn get_video_subtitles(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Path(video_id): Path<String>,
+    Query(query): Query<TokenQuery>,
 ) -> Result<Json<SubtitleListResponse>, (StatusCode, String)> {
+    // Extract token from Cookie header or query parameter
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let mut token = query.token.as_deref().unwrap_or("");
+    if token.is_empty() {
+        for cookie in cookie_header.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("token=") {
+                token = val;
+                break;
+            }
+        }
+    }
+
+    // Extract client IP from X-Forwarded-For header, fallback to addr.ip()
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| addr.ip().to_string());
+
+    // Extract User-Agent header
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !verify_token(&video_id, token, &state.config.server.secret_key, &ip, user_agent) {
+        error!(
+            video_id = %video_id,
+            ip = %ip,
+            "Subtitle list access denied: invalid or expired token"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: Invalid or expired token".to_string(),
+        ));
+    }
+
     let subtitles = get_subtitles_for_video(&state.db_pool, &video_id)
         .await
         .map_err(internal_err)?;
@@ -1854,8 +1905,55 @@ pub async fn get_video_subtitles(
 // Get a specific subtitle file
 pub async fn get_subtitle_file(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Path((video_id, track_with_ext)): Path<(String, String)>,
+    Query(query): Query<TokenQuery>,
 ) -> Result<Response, (StatusCode, String)> {
+    // Extract token from Cookie header or query parameter
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let mut token = query.token.as_deref().unwrap_or("");
+    if token.is_empty() {
+        for cookie in cookie_header.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("token=") {
+                token = val;
+                break;
+            }
+        }
+    }
+
+    // Extract client IP from X-Forwarded-For header, fallback to addr.ip()
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| addr.ip().to_string());
+
+    // Extract User-Agent header
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !verify_token(&video_id, token, &state.config.server.secret_key, &ip, user_agent) {
+        error!(
+            video_id = %video_id,
+            track = %track_with_ext,
+            ip = %ip,
+            "Subtitle file access denied: invalid or expired token"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: Invalid or expired token".to_string(),
+        ));
+    }
+
     // Parse track index from "0.ass" or "1.srt" format
     let track_index: i32 = track_with_ext
         .split('.')
@@ -1903,8 +2001,54 @@ pub async fn get_subtitle_file(
 // Get list of attachments (fonts) for a video
 pub async fn get_video_attachments(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Path(video_id): Path<String>,
+    Query(query): Query<TokenQuery>,
 ) -> Result<Json<AttachmentListResponse>, (StatusCode, String)> {
+    // Extract token from Cookie header or query parameter
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let mut token = query.token.as_deref().unwrap_or("");
+    if token.is_empty() {
+        for cookie in cookie_header.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("token=") {
+                token = val;
+                break;
+            }
+        }
+    }
+
+    // Extract client IP from X-Forwarded-For header, fallback to addr.ip()
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| addr.ip().to_string());
+
+    // Extract User-Agent header
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !verify_token(&video_id, token, &state.config.server.secret_key, &ip, user_agent) {
+        error!(
+            video_id = %video_id,
+            ip = %ip,
+            "Attachment list access denied: invalid or expired token"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: Invalid or expired token".to_string(),
+        ));
+    }
+
     let attachments = get_attachments_for_video(&state.db_pool, &video_id)
         .await
         .map_err(internal_err)?;
@@ -1915,8 +2059,55 @@ pub async fn get_video_attachments(
 // Get a specific attachment file (font)
 pub async fn get_attachment_file(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Path((video_id, filename)): Path<(String, String)>,
+    Query(query): Query<TokenQuery>,
 ) -> Result<Response, (StatusCode, String)> {
+    // Extract token from Cookie header or query parameter
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let mut token = query.token.as_deref().unwrap_or("");
+    if token.is_empty() {
+        for cookie in cookie_header.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("token=") {
+                token = val;
+                break;
+            }
+        }
+    }
+
+    // Extract client IP from X-Forwarded-For header, fallback to addr.ip()
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| addr.ip().to_string());
+
+    // Extract User-Agent header
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !verify_token(&video_id, token, &state.config.server.secret_key, &ip, user_agent) {
+        error!(
+            video_id = %video_id,
+            filename = %filename,
+            ip = %ip,
+            "Attachment file access denied: invalid or expired token"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: Invalid or expired token".to_string(),
+        ));
+    }
+
     let attachment = get_attachment_by_filename(&state.db_pool, &video_id, &filename)
         .await
         .map_err(internal_err)?
@@ -1951,8 +2142,54 @@ pub async fn get_attachment_file(
 // Get chapters for a video
 pub async fn get_video_chapters(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Path(video_id): Path<String>,
+    Query(query): Query<TokenQuery>,
 ) -> Result<Json<ChapterListResponse>, (StatusCode, String)> {
+    // Extract token from Cookie header or query parameter
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let mut token = query.token.as_deref().unwrap_or("");
+    if token.is_empty() {
+        for cookie in cookie_header.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("token=") {
+                token = val;
+                break;
+            }
+        }
+    }
+
+    // Extract client IP from X-Forwarded-For header, fallback to addr.ip()
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| addr.ip().to_string());
+
+    // Extract User-Agent header
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !verify_token(&video_id, token, &state.config.server.secret_key, &ip, user_agent) {
+        error!(
+            video_id = %video_id,
+            ip = %ip,
+            "Chapter list access denied: invalid or expired token"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: Invalid or expired token".to_string(),
+        ));
+    }
+
     let chapters = get_chapters_for_video(&state.db_pool, &video_id)
         .await
         .map_err(internal_err)?;
@@ -2100,9 +2337,10 @@ pub async fn get_player(
     let fonts_js = if has_fonts {
         let font_urls: Vec<String> = attachments
             .iter()
-            .map(|att| format!(r#""/api/videos/{}/attachments/{}""#, id, att.filename))
+            .map(|att| format!("/api/videos/{}/attachments/{}", id, att.filename))
             .collect();
-        format!("const fonts = [{}];", font_urls.join(", "))
+        let json = serde_json::to_string(&font_urls).unwrap_or_else(|_| "[]".to_string());
+        format!("const fonts = {};", json)
     } else {
         String::new()
     };
