@@ -1,14 +1,12 @@
 use crate::clickhouse;
-use crate::types::AppState;
 use crate::handlers::common::internal_err;
+use crate::types::AppState;
 
 use axum::{
     Json,
     extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode, header},
-    response::{
-        sse::{Event, Sse},
-    },
+    response::sse::{Event, Sse},
 };
 use futures::stream::Stream;
 use std::collections::HashMap;
@@ -67,7 +65,7 @@ pub async fn track_view(
     // Insert view into ClickHouse
     match crate::clickhouse::insert_view(&state.clickhouse, &video_id, &ip, user_agent).await {
         Ok(_) => {
-            info!("View tracked for video {} from {}", video_id, ip);
+            info!("View tracked for video {}", video_id);
             StatusCode::OK
         }
         Err(e) => {

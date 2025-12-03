@@ -288,7 +288,10 @@ pub fn verify_token(video_id: &str, token: &str, secret: &str, ip: &str, user_ag
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(payload.as_bytes());
 
-    let expected_signature = hex::encode(mac.finalize().into_bytes());
-
-    expected_signature == signature
+    // Use constant-time comparison to prevent timing attacks
+    let expected_bytes = mac.finalize().into_bytes();
+    match hex::decode(signature) {
+        Ok(sig_bytes) => expected_bytes.as_slice() == sig_bytes.as_slice(),
+        Err(_) => false,
+    }
 }

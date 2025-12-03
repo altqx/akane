@@ -2,8 +2,8 @@ use crate::database::{
     get_attachment_by_filename, get_attachments_for_video, get_chapters_for_video,
     get_subtitle_by_track, get_subtitles_for_video,
 };
-use crate::types::{AppState, AttachmentListResponse, ChapterListResponse, SubtitleListResponse};
 use crate::handlers::common::{internal_err, verify_token};
+use crate::types::{AppState, AttachmentListResponse, ChapterListResponse, SubtitleListResponse};
 
 use axum::{
     Json,
@@ -59,7 +59,13 @@ pub async fn get_video_subtitles(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !verify_token(&video_id, token, &state.config.server.secret_key, &ip, user_agent) {
+    if !verify_token(
+        &video_id,
+        token,
+        &state.config.server.secret_key,
+        &ip,
+        user_agent,
+    ) {
         error!(
             video_id = %video_id,
             ip = %ip,
@@ -116,7 +122,13 @@ pub async fn get_subtitle_file(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !verify_token(&video_id, token, &state.config.server.secret_key, &ip, user_agent) {
+    if !verify_token(
+        &video_id,
+        token,
+        &state.config.server.secret_key,
+        &ip,
+        user_agent,
+    ) {
         error!(
             video_id = %video_id,
             track = %track_with_ext,
@@ -211,7 +223,13 @@ pub async fn get_video_attachments(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !verify_token(&video_id, token, &state.config.server.secret_key, &ip, user_agent) {
+    if !verify_token(
+        &video_id,
+        token,
+        &state.config.server.secret_key,
+        &ip,
+        user_agent,
+    ) {
         error!(
             video_id = %video_id,
             ip = %ip,
@@ -268,7 +286,13 @@ pub async fn get_attachment_file(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !verify_token(&video_id, token, &state.config.server.secret_key, &ip, user_agent) {
+    if !verify_token(
+        &video_id,
+        token,
+        &state.config.server.secret_key,
+        &ip,
+        user_agent,
+    ) {
         error!(
             video_id = %video_id,
             filename = %filename,
@@ -350,7 +374,13 @@ pub async fn get_video_chapters(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !verify_token(&video_id, token, &state.config.server.secret_key, &ip, user_agent) {
+    if !verify_token(
+        &video_id,
+        token,
+        &state.config.server.secret_key,
+        &ip,
+        user_agent,
+    ) {
         error!(
             video_id = %video_id,
             ip = %ip,
@@ -380,7 +410,13 @@ pub async fn get_jassub_worker(
     };
 
     // Fetch from CDN
-    let response = reqwest::get(url)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+    let response = client
+        .get(url)
+        .send()
         .await
         .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
 

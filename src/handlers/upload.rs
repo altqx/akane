@@ -1,24 +1,20 @@
-use crate::database::{
-    save_attachment, save_chapter, save_subtitle, save_video,
-};
+use crate::database::{save_attachment, save_chapter, save_subtitle, save_video};
+use crate::handlers::common::{internal_err, now_millis};
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
-    AppState, ChunkUploadResponse, ChunkedUpload, FinalizeUploadRequest, ProgressMap, ProgressResponse,
-    ProgressUpdate, QueueItem, QueueListResponse, UploadAccepted, UploadResponse,
+    AppState, ChunkUploadResponse, ChunkedUpload, FinalizeUploadRequest, ProgressMap,
+    ProgressResponse, ProgressUpdate, QueueItem, QueueListResponse, UploadAccepted, UploadResponse,
 };
 use crate::video::{
     encode_to_hls, extract_all_attachments, extract_subtitle, get_attachments, get_chapters,
     get_subtitle_streams, get_variants_for_height, get_video_duration, get_video_height,
 };
-use crate::handlers::common::{internal_err, now_millis};
 
 use axum::{
     Json,
     extract::{Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{
-        sse::{Event, Sse},
-    },
+    response::sse::{Event, Sse},
 };
 use futures::stream::Stream;
 use std::collections::HashMap;
@@ -157,12 +153,8 @@ pub async fn upload_video(
         )
     })?;
 
-    let video_name = video_name.ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "missing field 'name'".to_string(),
-        )
-    })?;
+    let video_name =
+        video_name.ok_or_else(|| (StatusCode::BAD_REQUEST, "missing field 'name'".to_string()))?;
 
     let initial_progress = ProgressUpdate {
         stage: "Queued for processing".to_string(),

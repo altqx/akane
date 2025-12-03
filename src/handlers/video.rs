@@ -1,10 +1,10 @@
 use crate::clickhouse;
 use crate::database::{
-    count_videos, delete_videos as db_delete_videos, get_video_ids_with_prefix, list_videos as db_list_videos,
-    update_video as db_update_video,
+    count_videos, delete_videos as db_delete_videos, get_video_ids_with_prefix,
+    list_videos as db_list_videos, update_video as db_update_video,
 };
-use crate::types::{AppState, VideoListResponse, VideoQuery};
 use crate::handlers::common::internal_err;
+use crate::types::{AppState, VideoListResponse, VideoQuery};
 
 use axum::{
     Json,

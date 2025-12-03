@@ -1,8 +1,6 @@
-use crate::database::{
-    get_attachments_for_video, get_chapters_for_video, get_subtitles_for_video,
-};
-use crate::types::AppState;
+use crate::database::{get_attachments_for_video, get_chapters_for_video, get_subtitles_for_video};
 use crate::handlers::common::{generate_token, internal_err, minify_js_simple, verify_token};
+use crate::types::AppState;
 
 use axum::{
     body::Body,
