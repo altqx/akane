@@ -1,10 +1,9 @@
 use crate::clickhouse;
 use crate::database::{
-    count_videos, delete_videos as db_delete_videos,
-    get_attachment_by_filename, get_attachments_for_video, get_chapters_for_video,
-    get_subtitle_by_track, get_subtitles_for_video, get_video_ids_with_prefix,
-    list_videos as db_list_videos, save_attachment, save_chapter, save_subtitle, save_video,
-    update_video as db_update_video,
+    count_videos, delete_videos as db_delete_videos, get_attachment_by_filename,
+    get_attachments_for_video, get_chapters_for_video, get_subtitle_by_track,
+    get_subtitles_for_video, get_video_ids_with_prefix, list_videos as db_list_videos,
+    save_attachment, save_chapter, save_subtitle, save_video, update_video as db_update_video,
 };
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
@@ -17,7 +16,6 @@ use crate::video::{
     encode_to_hls, extract_all_attachments, extract_subtitle, get_attachments, get_chapters,
     get_subtitle_streams, get_variants_for_height, get_video_duration, get_video_height,
 };
-use futures::StreamExt;
 use axum::{
     Json,
     body::Body,
@@ -28,6 +26,7 @@ use axum::{
         sse::{Event, Sse},
     },
 };
+use futures::StreamExt;
 use futures::stream::Stream;
 use regex::Regex;
 use std::collections::HashMap;
@@ -39,19 +38,218 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 fn minify_js_simple(code: &str) -> String {
-    let re_single_comment = Regex::new(r"(?m)^[^\S\n]*//[^\n]*$|([^:])//[^\n]*").unwrap();
-    let code = re_single_comment.replace_all(code, "$1");
-    let re_multi_comment = Regex::new(r"(?s)/\*.*?\*/").unwrap();
-    let code = re_multi_comment.replace_all(&code, "");
-    let re_empty_lines = Regex::new(r"(?m)^\s*\n").unwrap();
-    let code = re_empty_lines.replace_all(&code, "");
-    let re_spaces = Regex::new(r"[ \t]+").unwrap();
-    let code = re_spaces.replace_all(&code, " ");
-    let re_space_around = Regex::new(r"\s*([{}();,:\[\]=<>+\-*/&|!?])\s*").unwrap();
-    let code = re_space_around.replace_all(&code, "$1");
-    let re_newlines = Regex::new(r"\n+").unwrap();
-    let code = re_newlines.replace_all(&code, "");
-    code.trim().to_string()
+    let mut result = String::with_capacity(code.len());
+    let chars: Vec<char> = code.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut last_non_ws: Option<char> = None;
+    let mut needs_space = false;
+    let is_ident_char = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+
+    // Helper to check if we're at a regex context (after certain tokens)
+    let can_be_regex = |last: Option<char>| {
+        matches!(
+            last,
+            None | Some(
+                '(' | ',' | '=' | ':' | '[' | '!' | '&' | '|' | '?' | '{' | '}' | ';' | '\n'
+            )
+        )
+    };
+
+    while i < len {
+        let c = chars[i];
+
+        // Handle single-line comments
+        if c == '/' && i + 1 < len && chars[i + 1] == '/' {
+            // Skip until end of line
+            i += 2;
+            while i < len && chars[i] != '\n' {
+                i += 1;
+            }
+            // Don't increment i here, let the main loop handle the newline
+            continue;
+        }
+
+        // Handle multi-line comments
+        if c == '/' && i + 1 < len && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2; // Skip */
+            needs_space = true; // Comments might separate tokens
+            continue;
+        }
+
+        // Handle string literals (single and double quotes)
+        if c == '"' || c == '\'' {
+            let quote = c;
+            result.push(c);
+            i += 1;
+            while i < len {
+                let sc = chars[i];
+                result.push(sc);
+                if sc == '\\' && i + 1 < len {
+                    // Push escaped character
+                    i += 1;
+                    result.push(chars[i]);
+                } else if sc == quote {
+                    break;
+                }
+                i += 1;
+            }
+            last_non_ws = Some(quote);
+            needs_space = false;
+            i += 1;
+            continue;
+        }
+
+        // Handle template literals (backticks)
+        if c == '`' {
+            result.push(c);
+            i += 1;
+            let mut brace_depth = 0;
+            while i < len {
+                let tc = chars[i];
+                if tc == '\\' && i + 1 < len {
+                    result.push(tc);
+                    i += 1;
+                    result.push(chars[i]);
+                } else if tc == '$' && i + 1 < len && chars[i + 1] == '{' {
+                    result.push(tc);
+                    i += 1;
+                    result.push(chars[i]);
+                    brace_depth += 1;
+                } else if tc == '{' && brace_depth > 0 {
+                    result.push(tc);
+                    brace_depth += 1;
+                } else if tc == '}' && brace_depth > 0 {
+                    result.push(tc);
+                    brace_depth -= 1;
+                } else if tc == '`' && brace_depth == 0 {
+                    result.push(tc);
+                    break;
+                } else {
+                    result.push(tc);
+                }
+                i += 1;
+            }
+            last_non_ws = Some('`');
+            needs_space = false;
+            i += 1;
+            continue;
+        }
+
+        // Handle regex literals
+        if c == '/' && can_be_regex(last_non_ws) {
+            // Check it's not a division operator by looking ahead
+            let mut j = i + 1;
+            let mut is_regex = false;
+            let mut escaped = false;
+            let mut in_class = false;
+
+            while j < len {
+                let rc = chars[j];
+                if escaped {
+                    escaped = false;
+                } else if rc == '\\' {
+                    escaped = true;
+                } else if rc == '[' && !in_class {
+                    in_class = true;
+                } else if rc == ']' && in_class {
+                    in_class = false;
+                } else if rc == '/' && !in_class {
+                    is_regex = true;
+                    break;
+                } else if rc == '\n' {
+                    break; // Regex can't span lines without escape
+                }
+                j += 1;
+            }
+
+            if is_regex {
+                // Copy the regex literal
+                result.push(c);
+                i += 1;
+                escaped = false;
+                in_class = false;
+                while i < len {
+                    let rc = chars[i];
+                    result.push(rc);
+                    if escaped {
+                        escaped = false;
+                    } else if rc == '\\' {
+                        escaped = true;
+                    } else if rc == '[' && !in_class {
+                        in_class = true;
+                    } else if rc == ']' && in_class {
+                        in_class = false;
+                    } else if rc == '/' && !in_class {
+                        i += 1;
+                        // Copy regex flags
+                        while i < len && chars[i].is_ascii_alphabetic() {
+                            result.push(chars[i]);
+                            i += 1;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                last_non_ws = Some('/');
+                needs_space = false;
+                continue;
+            }
+        }
+
+        // Handle whitespace
+        if c.is_whitespace() {
+            if last_non_ws.is_some() {
+                needs_space = true;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Determine if we need to preserve space between tokens
+        if needs_space {
+            if let Some(last) = last_non_ws {
+                // Space needed between identifier characters
+                let last_is_ident = is_ident_char(last);
+                let curr_is_ident = is_ident_char(c);
+
+                // Space needed for keywords that could be ambiguous
+                // e.g., "return x" vs "returnx", "typeof x" vs "typeofx"
+                let needs_separator = (last_is_ident && curr_is_ident)
+                    || (last_is_ident && c == '/')  // "return /regex/"
+                    || (last == '/' && curr_is_ident); // Rare but possible
+
+                // Handle operators that could be ambiguous without space
+                // e.g., "a + +b" should not become "a++b"
+                let ambiguous_ops =
+                    matches!((last, c), ('+', '+') | ('-', '-') | ('+', '-') | ('-', '+'));
+
+                if needs_separator || ambiguous_ops {
+                    result.push(' ');
+                }
+            }
+            needs_space = false;
+        }
+
+        result.push(c);
+        last_non_ws = Some(c);
+        i += 1;
+    }
+
+    // Final cleanup: remove unnecessary semicolons before closing braces
+    let result = Regex::new(r";+}")
+        .unwrap()
+        .replace_all(&result, "}")
+        .to_string();
+
+    // Remove trailing semicolons
+    let result = result.trim_end_matches(';').to_string();
+
+    result
 }
 
 fn now_millis() -> u64 {
@@ -1971,31 +2169,38 @@ pub async fn get_player(
             _ => "ass",
         };
         let fonts_array = if has_fonts { "fonts" } else { "[]" };
+        let default_sub_url = format!("/api/videos/{}/subtitles/{}.{}", id, sub.track_index, ext);
 
         // Build subtitle selector if multiple subtitles exist
         let subtitle_selector = if has_multiple_subtitles {
             r#"
-            // Add subtitle selector to settings
-            art.setting.add({
-                name: 'subtitle',
-                html: 'Subtitle',
-                tooltip: subtitles.find(s => s.default)?.name || subtitles[0]?.name || 'None',
-                selector: [
-                    { html: 'Off', value: null },
-                    ...subtitles.map(s => ({ html: s.name, url: s.url, default: s.default }))
-                ],
-                onSelect: function(item) {
-                    if (item.value === null) {
-                        // Turn off subtitles
-                        if (window.jassub) {
-                            window.jassub.freeTrack();
+                // Add subtitle selector to settings
+                art.setting.add({
+                    name: 'subtitle',
+                    html: 'Subtitle',
+                    tooltip: subtitles.find(s => s.default)?.name || subtitles[0]?.name || 'None',
+                    selector: [
+                        { html: 'Off', value: 'off' },
+                        ...subtitles.map(s => ({ html: s.name, url: s.url, default: s.default }))
+                    ],
+                    onSelect: function(item) {
+                        if (item.value === 'off') {
+                            window.subtitlesEnabled = false;
+                            updateToggleButton();
+                            if (window.jassub) {
+                                window.jassub.freeTrack();
+                            }
+                        } else if (item.url) {
+                            window.subtitlesEnabled = true;
+                            window.currentSubUrl = item.url;
+                            updateToggleButton();
+                            if (window.jassub) {
+                                window.jassub.setTrackByUrl(item.url);
+                            }
                         }
-                    } else if (item.url && window.jassub) {
-                        window.jassub.setTrackByUrl(item.url);
-                    }
-                    return item.html;
-                },
-            });"#
+                        return item.html;
+                    },
+                });"#
                 .to_string()
         } else {
             String::new()
@@ -2005,29 +2210,59 @@ pub async fn get_player(
             r#"
             // Initialize JASSUB for ASS subtitle rendering after Artplayer is ready
             art.on('ready', function() {{
+                // Subtitle state management
+                window.subtitlesEnabled = true;
+                window.currentSubUrl = '{default_sub_url}';
+                
+                function updateToggleButton() {{
+                    const toggleEl = document.querySelector('.art-control-subtitle-toggle');
+                    if (toggleEl) {{
+                        toggleEl.style.opacity = window.subtitlesEnabled ? '1' : '0.5';
+                    }}
+                }}
+
                 console.log('Artplayer ready, initializing JASSUB...');
                 console.log('Video element:', art.video);
-                console.log('subUrl:', '/api/videos/{video_id}/subtitles/{track_index}.{ext}');
+                console.log('subUrl:', window.currentSubUrl);
                 console.log('fonts:', {fonts_array});
+                
                 try {{
                     window.jassub = new JASSUB({{
                         video: art.video,
-                        subUrl: '/api/videos/{video_id}/subtitles/{track_index}.{ext}',
+                        subUrl: window.currentSubUrl,
                         workerUrl: '/jassub/jassub-worker.js',
                         wasmUrl: '/jassub/jassub-worker.wasm',
                         fonts: {fonts_array},
                         fallbackFont: 'Arial',
-                        debug: true,
                     }});
                     console.log('JASSUB initialized:', window.jassub);
                 }} catch (e) {{
                     console.error('JASSUB initialization error:', e);
                 }}
+
+                // Add subtitle toggle button to controls
+                art.controls.add({{
+                    name: 'subtitle-toggle',
+                    position: 'right',
+                    index: 10,
+                    html: '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V6h16v12zM6 10h2v2H6zm0 4h8v2H6zm10 0h2v2h-2zm-6-4h8v2h-8z"/></svg>',
+                    tooltip: 'Toggle Subtitles',
+                    style: {{ color: '#fff' }},
+                    click: function() {{
+                        window.subtitlesEnabled = !window.subtitlesEnabled;
+                        updateToggleButton();
+                        if (window.jassub) {{
+                            if (window.subtitlesEnabled && window.currentSubUrl) {{
+                                window.jassub.setTrackByUrl(window.currentSubUrl);
+                            }} else {{
+                                window.jassub.freeTrack();
+                            }}
+                        }}
+                    }},
+                }});
                 {subtitle_selector}
             }});"#,
-            video_id = id,
-            track_index = sub.track_index,
-            ext = ext,
+            default_sub_url = default_sub_url,
             fonts_array = fonts_array,
             subtitle_selector = subtitle_selector
         )
@@ -2045,6 +2280,14 @@ pub async fn get_player(
         {chapters_js}
 
         function init() {{
+            // Get saved settings from Artplayer's localStorage
+            let savedSettings = {{}};
+            try {{
+                savedSettings = JSON.parse(localStorage.getItem('artplayer_settings')) || {{}};
+            }} catch {{}}
+            const savedQualityLevel = savedSettings.qualityLevel;
+            const savedPlaybackRate = savedSettings.playbackRate;
+            
             art = new Artplayer({{
                 container: '#artplayer',
                 url: '/hls/{video_id}/index.m3u8',
@@ -2088,6 +2331,18 @@ pub async fn get_player(
                             hls.attachMedia(video);
                             art.hls = hls;
                             art.on('destroy', () => hls.destroy());
+                            
+                            // Restore saved quality level after HLS manifest is loaded
+                            hls.on(Hls.Events.MANIFEST_PARSED, function() {{
+                                if (savedQualityLevel !== undefined && savedQualityLevel >= -1 && savedQualityLevel < hls.levels.length) {{
+                                    hls.currentLevel = savedQualityLevel;
+                                }}
+                            }});
+                            
+                            // Save quality level when changed
+                            hls.on(Hls.Events.LEVEL_SWITCHED, function(event, data) {{
+                                art.storage.set('qualityLevel', data.level);
+                            }});
                         }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
                             video.src = url;
                         }} else {{
@@ -2096,6 +2351,18 @@ pub async fn get_player(
                     }},
                 }},
             }});
+            
+            // Restore and persist playback rate
+            art.on('ready', function() {{
+                if (savedPlaybackRate && savedPlaybackRate !== 1) {{
+                    art.playbackRate = savedPlaybackRate;
+                }}
+            }});
+            
+            art.on('video:ratechange', function() {{
+                art.storage.set('playbackRate', art.playbackRate);
+            }});
+            
             {jassub_init_js}
             art.on('play', onFirstPlay);
             art.on('error', onError);
