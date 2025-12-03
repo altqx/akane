@@ -1,6 +1,6 @@
 use crate::clickhouse;
 use crate::database::{
-    /*clear_database,*/ count_videos, delete_videos as db_delete_videos,
+    count_videos, delete_videos as db_delete_videos,
     get_attachment_by_filename, get_attachments_for_video, get_chapters_for_video,
     get_subtitle_by_track, get_subtitles_for_video, get_video_ids_with_prefix,
     list_videos as db_list_videos, save_attachment, save_chapter, save_subtitle, save_video,
@@ -18,7 +18,6 @@ use crate::video::{
     get_subtitle_streams, get_variants_for_height, get_video_duration, get_video_height,
 };
 use futures::StreamExt;
-// use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use axum::{
     Json,
     body::Body,
@@ -30,17 +29,31 @@ use axum::{
     },
 };
 use futures::stream::Stream;
-use minify_js::{Session, TopLevelMode, minify};
+use regex::Regex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::panic;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{fs, io::AsyncReadExt, io::AsyncWriteExt};
 use tracing::{error, info};
 use uuid::Uuid;
 
-// Get current timestamp in milliseconds
+fn minify_js_simple(code: &str) -> String {
+    let re_single_comment = Regex::new(r"(?m)^[^\S\n]*//[^\n]*$|([^:])//[^\n]*").unwrap();
+    let code = re_single_comment.replace_all(code, "$1");
+    let re_multi_comment = Regex::new(r"(?s)/\*.*?\*/").unwrap();
+    let code = re_multi_comment.replace_all(&code, "");
+    let re_empty_lines = Regex::new(r"(?m)^\s*\n").unwrap();
+    let code = re_empty_lines.replace_all(&code, "");
+    let re_spaces = Regex::new(r"[ \t]+").unwrap();
+    let code = re_spaces.replace_all(&code, " ");
+    let re_space_around = Regex::new(r"\s*([{}();,:\[\]=<>+\-*/&|!?])\s*").unwrap();
+    let code = re_space_around.replace_all(&code, "$1");
+    let re_newlines = Regex::new(r"\n+").unwrap();
+    let code = re_newlines.replace_all(&code, "");
+    code.trim().to_string()
+}
+
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -48,10 +61,8 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
-// Helper to update progress while preserving the original created_at timestamp
 async fn update_progress(progress_map: &ProgressMap, upload_id: &str, mut update: ProgressUpdate) {
     let mut map = progress_map.write().await;
-    // Preserve the original created_at if the entry exists
     if let Some(existing) = map.get(upload_id) {
         update.created_at = existing.created_at;
     }
@@ -67,14 +78,12 @@ pub async fn upload_video(
     let mut video_name: Option<String> = None;
     let mut tags: Vec<String> = Vec::new();
 
-    // Create a unique upload ID for progress tracking, or use provided one
     let upload_id = headers
         .get("X-Upload-ID")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    // Initialize progress immediately to avoid race condition with SSE
     {
         let initial_progress = ProgressUpdate {
             stage: "Initializing upload".to_string(),
@@ -116,7 +125,6 @@ pub async fn upload_video(
                     .await
                     .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
 
-                // Stream the file to disk and update progress
                 let mut total_bytes = 0;
                 while let Some(chunk) = field
                     .chunk()
@@ -139,7 +147,7 @@ pub async fn upload_video(
                             result: None,
                             error: None,
                             video_name: None,
-                            created_at: 0, // Will be set by update_progress
+                            created_at: 0,
                         };
                         update_progress(&state.progress, &upload_id, progress_update).await;
                     }
@@ -159,7 +167,6 @@ pub async fn upload_video(
                     .text()
                     .await
                     .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
-                // Parse tags as JSON array or comma-separated
                 if let Ok(parsed_tags) = serde_json::from_str::<Vec<String>>(&text) {
                     tags = parsed_tags;
                 } else {
@@ -190,7 +197,6 @@ pub async fn upload_video(
         )
     })?;
 
-    // Initialize progress with video name
     let initial_progress = ProgressUpdate {
         stage: "Queued for processing".to_string(),
         current_chunk: 0,
@@ -201,11 +207,10 @@ pub async fn upload_video(
         result: None,
         error: None,
         video_name: Some(video_name.clone()),
-        created_at: 0, // Will be set by update_progress
+        created_at: 0,
     };
     update_progress(&state.progress, &upload_id, initial_progress).await;
 
-    // Spawn background task for processing
     let state_clone = state.clone();
     let upload_id_clone = upload_id.clone();
     let video_path_clone = video_path.clone();
@@ -214,14 +219,12 @@ pub async fn upload_video(
 
     tokio::spawn(async move {
         let result = async {
-            // Encode to HLS (playlist + segments) into a temp directory
             let output_id = Uuid::new_v4().to_string();
             let hls_dir = std::env::temp_dir().join(format!("hls-{}", &output_id));
             fs::create_dir_all(&hls_dir)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
 
-            // Get video metadata before encoding (parallel)
             let (video_duration, original_height) = tokio::join!(
                 get_video_duration(&video_path_clone),
                 get_video_height(&video_path_clone)
@@ -232,7 +235,6 @@ pub async fn upload_video(
             let available_resolutions: Vec<String> =
                 variants.iter().map(|v| v.label.clone()).collect();
 
-            // Update progress: FFmpeg processing stage
             let encoding_progress = ProgressUpdate {
                 stage: "FFmpeg processing".to_string(),
                 current_chunk: 0,
@@ -243,7 +245,7 @@ pub async fn upload_video(
                 result: None,
                 error: None,
                 video_name: Some(video_name_clone.clone()),
-                created_at: 0, // Will be set by update_progress
+                created_at: 0,
             };
             update_progress(&state_clone.progress, &upload_id_clone, encoding_progress).await;
 
@@ -298,7 +300,6 @@ pub async fn upload_video(
                 }
             }
 
-            // Update progress: Upload to R2 stage
             let upload_progress = ProgressUpdate {
                 stage: "Upload to R2".to_string(),
                 current_chunk: 0,
@@ -309,17 +310,14 @@ pub async fn upload_video(
                 result: None,
                 error: None,
                 video_name: Some(video_name_clone.clone()),
-                created_at: 0, // Will be set by update_progress
+                created_at: 0,
             };
             update_progress(&state_clone.progress, &upload_id_clone, upload_progress).await;
 
-            // Upload HLS to R2
             let prefix = format!("{}/", output_id);
-            // Build public URL (pointing to our proxy)
             let playlist_key =
                 upload_hls_to_r2(&state_clone, &hls_dir, &prefix, Some(&upload_id_clone)).await?;
 
-            // Save to database
             let thumbnail_key = format!("{}/thumbnail.jpg", output_id);
             let entrypoint = playlist_key.clone();
 
@@ -398,11 +396,9 @@ pub async fn upload_video(
                 }
             }
 
-            // Cleanup (ignore errors)
             let _ = fs::remove_file(&video_path_clone).await;
             let _ = fs::remove_dir_all(&hls_dir).await;
 
-            // Return player URL
             let player_url = format!("/player/{}", output_id);
             Ok::<_, anyhow::Error>(UploadResponse {
                 player_url,
@@ -445,7 +441,6 @@ pub async fn upload_video(
             }
         }
 
-        // Clean up completed/failed progress entries after 10 seconds
         tokio::time::sleep(Duration::from_secs(10)).await;
         let mut progress_map = state_clone.progress.write().await;
         if let Some(entry) = progress_map.get(&upload_id_clone)
@@ -461,7 +456,6 @@ pub async fn upload_video(
     }))
 }
 
-// Handle chunked upload - receives individual chunks of a large file
 pub async fn upload_chunk(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -549,7 +543,6 @@ pub async fn upload_chunk(
         file_name
     );
 
-    // Initialize or get chunked upload entry
     let temp_dir = {
         let mut uploads = state.chunked_uploads.write().await;
 
@@ -569,7 +562,6 @@ pub async fn upload_chunk(
                 },
             );
 
-            // Initialize progress
             let progress = ProgressUpdate {
                 stage: "Receiving chunks".to_string(),
                 current_chunk: 0,
@@ -592,13 +584,11 @@ pub async fn upload_chunk(
         uploads.get(&upload_id).unwrap().temp_dir.clone()
     };
 
-    // Write chunk to temp file
     let chunk_path = temp_dir.join(format!("chunk_{:06}", chunk_index));
     fs::write(&chunk_path, &chunk_data)
         .await
         .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
 
-    // Mark chunk as received
     {
         let mut uploads = state.chunked_uploads.write().await;
         if let Some(upload) = uploads.get_mut(&upload_id) {
@@ -606,7 +596,6 @@ pub async fn upload_chunk(
         }
     }
 
-    // Update progress
     let received_count = {
         let uploads = state.chunked_uploads.read().await;
         uploads
@@ -628,7 +617,7 @@ pub async fn upload_chunk(
         result: None,
         error: None,
         video_name: Some(file_name.replace(&['.'][..], "_")),
-        created_at: 0, // Will be set by update_progress
+        created_at: 0,
     };
     update_progress(&state.progress, &upload_id, progress).await;
 
@@ -658,7 +647,6 @@ pub async fn finalize_chunked_upload(
 
     info!("Finalizing chunked upload: {}", upload_id);
 
-    // Get and remove chunked upload entry
     let chunked_upload = {
         let mut uploads = state.chunked_uploads.write().await;
         uploads.remove(&upload_id).ok_or_else(|| {
@@ -669,7 +657,6 @@ pub async fn finalize_chunked_upload(
         })?
     };
 
-    // Verify all chunks received
     if !chunked_upload.received_chunks.iter().all(|&r| r) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -677,7 +664,6 @@ pub async fn finalize_chunked_upload(
         ));
     }
 
-    // Update progress
     let progress = ProgressUpdate {
         stage: "Assembling file".to_string(),
         current_chunk: chunked_upload.total_chunks,
@@ -688,11 +674,9 @@ pub async fn finalize_chunked_upload(
         result: None,
         error: None,
         video_name: Some(body.name.clone()),
-        created_at: 0, // Will be set by update_progress
+        created_at: 0,
     };
     update_progress(&state.progress, &upload_id, progress).await;
-
-    // Assemble chunks into final file
     let final_path =
         std::env::temp_dir().join(format!("{}-{}", Uuid::new_v4(), chunked_upload.file_name));
     let mut final_file = fs::File::create(&final_path)
@@ -717,10 +701,8 @@ pub async fn finalize_chunked_upload(
             .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
     }
 
-    // Cleanup chunk temp directory
     let _ = fs::remove_dir_all(&chunked_upload.temp_dir).await;
 
-    // Parse tags
     let tags: Vec<String> = body
         .tags
         .map(|t| {
@@ -733,7 +715,6 @@ pub async fn finalize_chunked_upload(
 
     let video_name = body.name;
 
-    // Update progress to start processing
     let progress = ProgressUpdate {
         stage: "Queued for processing".to_string(),
         current_chunk: 0,
@@ -744,11 +725,9 @@ pub async fn finalize_chunked_upload(
         result: None,
         error: None,
         video_name: Some(video_name.clone()),
-        created_at: 0, // Will be set by update_progress
+        created_at: 0,
     };
     update_progress(&state.progress, &upload_id, progress).await;
-
-    // Spawn background task for processing (same as regular upload)
     let state_clone = state.clone();
     let upload_id_clone = upload_id.clone();
     let video_path_clone = final_path.clone();
@@ -979,7 +958,6 @@ pub async fn finalize_chunked_upload(
             }
         }
 
-        // Clean up completed/failed progress entries after 10 seconds
         tokio::time::sleep(Duration::from_secs(10)).await;
         let mut progress_map = state_clone.progress.write().await;
         if let Some(entry) = progress_map.get(&upload_id_clone)
@@ -1968,9 +1946,6 @@ pub async fn get_player(
         .to_string(),
     ];
 
-    // JASSUB is initialized separately after Artplayer is ready (not as a plugin)
-    // Subtitle switching is handled via Artplayer settings menu + JASSUB.setTrackByUrl()
-
     plugins.push("artplayerPluginAutoThumbnail({ width: 160, number: 100 })".to_string());
 
     // Only add chapter plugin if we have valid chapters
@@ -2159,30 +2134,8 @@ pub async fn get_player(
         jassub_init_js = jassub_init_js,
     );
 
-    // Minify the JavaScript code (with fallback if minifier panics on edge cases)
-    let minified_js = {
-        let js_clone = js_code.clone();
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            let session = Session::new();
-            let mut out = Vec::new();
-            if minify(
-                &session,
-                TopLevelMode::Global,
-                js_clone.as_bytes(),
-                &mut out,
-            )
-            .is_ok()
-            {
-                String::from_utf8(out).ok()
-            } else {
-                None
-            }
-        }));
-        match result {
-            Ok(Some(minified)) => minified,
-            _ => js_code.clone(), // Fallback to unminified JS if minification fails or panics
-        }
-    };
+    // Simple regex-based JS minification (safe, no panics)
+    let minified_js = minify_js_simple(&js_code);
 
     // Build HTML with only the required script tags
     let mut scripts = vec![

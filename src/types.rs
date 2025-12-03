@@ -17,7 +17,7 @@ pub struct ProgressUpdate {
     pub result: Option<UploadResponse>,
     pub error: Option<String>,
     pub video_name: Option<String>,
-    pub created_at: u64, // Unix timestamp in milliseconds for queue ordering
+    pub created_at: u64,
 }
 
 pub type ProgressMap = Arc<RwLock<HashMap<String, ProgressUpdate>>>;
@@ -106,7 +106,7 @@ pub struct QueueItem {
     pub details: Option<String>,
     pub status: String,
     pub video_name: Option<String>,
-    pub created_at: u64, // Unix timestamp in milliseconds for queue ordering
+    pub created_at: u64,
 }
 
 #[derive(Serialize)]
@@ -140,7 +140,6 @@ pub struct FinalizeUploadRequest {
     pub tags: Option<String>,
 }
 
-// Subtitle track metadata
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubtitleTrack {
     pub id: i64,
@@ -154,7 +153,6 @@ pub struct SubtitleTrack {
     pub is_forced: bool,
 }
 
-// Attachment metadata (fonts, etc.)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: i64,
@@ -164,10 +162,9 @@ pub struct Attachment {
     pub storage_key: String,
 }
 
-// FFprobe subtitle stream info
 #[derive(Clone, Debug)]
 pub struct SubtitleStreamInfo {
-    pub stream_index: i32, // Actual ffprobe stream index for extraction
+    pub stream_index: i32,
     pub codec_name: String,
     pub language: Option<String>,
     pub title: Option<String>,
@@ -175,25 +172,22 @@ pub struct SubtitleStreamInfo {
     pub is_forced: bool,
 }
 
-// FFprobe attachment info (fonts embedded in MKV)
 #[derive(Clone, Debug)]
 pub struct AttachmentInfo {
     pub filename: String,
     pub mimetype: String,
 }
 
-// Chapter metadata (from MKV chapters)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Chapter {
     pub id: i64,
     pub video_id: String,
     pub chapter_index: i32,
-    pub start_time: f64, // Start time in seconds
-    pub end_time: f64,   // End time in seconds
+    pub start_time: f64,
+    pub end_time: f64,
     pub title: String,
 }
 
-// FFprobe chapter info
 #[derive(Clone, Debug)]
 pub struct ChapterInfo {
     pub start_time: f64,
@@ -201,7 +195,6 @@ pub struct ChapterInfo {
     pub title: String,
 }
 
-// API response types
 #[derive(Serialize)]
 pub struct SubtitleListResponse {
     pub subtitles: Vec<SubtitleTrack>,

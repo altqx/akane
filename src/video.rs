@@ -72,8 +72,8 @@ pub async fn get_subtitle_streams(input: &PathBuf) -> Result<Vec<SubtitleStreamI
         .context("failed to run ffprobe for subtitles")?;
 
     if !output.status.success() {
-        // No subtitles is not an error
-        return Ok(Vec::new());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ffprobe for subtitles failed: {stderr}");
     }
 
     let json_str = String::from_utf8(output.stdout)?;
@@ -131,7 +131,8 @@ pub async fn get_attachments(input: &PathBuf) -> Result<Vec<AttachmentInfo>> {
                     let filename = s["tags"]["filename"].as_str()?;
                     let mimetype = s["tags"]["mimetype"].as_str().unwrap_or_else(|| {
                         // Guess mimetype from extension
-                        if filename.ends_with(".ttf") {
+                        let lowercase = filename.to_lowercase();
+                        if lowercase.ends_with(".ttf") {
                             "font/ttf"
                         } else if filename.ends_with(".otf") {
                             "font/otf"
@@ -214,7 +215,7 @@ pub async fn extract_subtitle(
     let format = match codec {
         "ass" | "ssa" => "ass",
         "subrip" | "srt" => "srt",
-        _ => "ass", // Default to ASS for other formats
+        _ => "ass",
     };
 
     info!(
@@ -231,7 +232,7 @@ pub async fn extract_subtitle(
         .arg("-map")
         .arg(format!("0:s:{}", subtitle_index))
         .arg("-c:s")
-        .arg(format) // Keep original format (ass or srt)
+        .arg(format)
         .arg(output_path)
         .output()
         .await
