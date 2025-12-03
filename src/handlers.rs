@@ -1,18 +1,20 @@
 use crate::clickhouse;
 use crate::database::{
     /*clear_database,*/ count_videos, delete_videos as db_delete_videos,
-    get_attachment_by_filename, get_attachments_for_video, get_subtitle_by_track,
-    get_subtitles_for_video, get_video_ids_with_prefix, list_videos as db_list_videos,
-    save_attachment, save_subtitle, save_video, update_video as db_update_video,
+    get_attachment_by_filename, get_attachments_for_video, get_chapters_for_video,
+    get_subtitle_by_track, get_subtitles_for_video, get_video_ids_with_prefix,
+    list_videos as db_list_videos, save_attachment, save_chapter, save_subtitle, save_video,
+    update_video as db_update_video,
 };
 use crate::storage::upload_hls_to_r2;
 use crate::types::{
-    AppState, AttachmentListResponse, ChunkUploadResponse, ChunkedUpload, FinalizeUploadRequest,
-    ProgressMap, ProgressResponse, ProgressUpdate, QueueItem, QueueListResponse,
-    SubtitleListResponse, UploadAccepted, UploadResponse, VideoListResponse, VideoQuery,
+    AppState, AttachmentListResponse, ChapterListResponse, ChunkUploadResponse, ChunkedUpload,
+    FinalizeUploadRequest, ProgressMap, ProgressResponse, ProgressUpdate, QueueItem,
+    QueueListResponse, SubtitleListResponse, UploadAccepted, UploadResponse, VideoListResponse,
+    VideoQuery,
 };
 use crate::video::{
-    encode_to_hls, extract_all_attachments, extract_subtitle, get_attachments,
+    encode_to_hls, extract_all_attachments, extract_subtitle, get_attachments, get_chapters,
     get_subtitle_streams, get_variants_for_height, get_video_duration, get_video_height,
 };
 use futures::StreamExt;
@@ -379,6 +381,23 @@ pub async fn upload_video(
                         "Failed to save attachment metadata for {}: {}",
                         att.filename, e
                     );
+                }
+            }
+
+            // Extract and save chapters from video
+            let chapter_streams = get_chapters(&video_path_clone).await.unwrap_or_default();
+            for (idx, chapter) in chapter_streams.iter().enumerate() {
+                if let Err(e) = save_chapter(
+                    &state_clone.db_pool,
+                    &output_id,
+                    idx as i32,
+                    chapter.start_time,
+                    chapter.end_time,
+                    &chapter.title,
+                )
+                .await
+                {
+                    error!("Failed to save chapter metadata for index {}: {}", idx, e);
                 }
             }
 
@@ -902,6 +921,23 @@ pub async fn finalize_chunked_upload(
                         "Failed to save attachment metadata for {}: {}",
                         att.filename, e
                     );
+                }
+            }
+
+            // Extract and save chapters from video
+            let chapter_streams = get_chapters(&video_path_clone).await.unwrap_or_default();
+            for (idx, chapter) in chapter_streams.iter().enumerate() {
+                if let Err(e) = save_chapter(
+                    &state_clone.db_pool,
+                    &output_id,
+                    idx as i32,
+                    chapter.start_time,
+                    chapter.end_time,
+                    &chapter.title,
+                )
+                .await
+                {
+                    error!("Failed to save chapter metadata for index {}: {}", idx, e);
                 }
             }
 
@@ -1736,6 +1772,18 @@ pub async fn get_attachment_file(
         .into_response())
 }
 
+// Get chapters for a video
+pub async fn get_video_chapters(
+    State(state): State<AppState>,
+    Path(video_id): Path<String>,
+) -> Result<Json<ChapterListResponse>, (StatusCode, String)> {
+    let chapters = get_chapters_for_video(&state.db_pool, &video_id)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(Json(ChapterListResponse { chapters }))
+}
+
 // Track a view when video starts playing (called from player)
 pub async fn track_view(
     State(state): State<AppState>,
@@ -1789,48 +1837,134 @@ pub async fn get_player(
     // Generate token (view is now tracked on first play, not page load)
     let token = generate_token(&id, &state.config.server.secret_key, &ip, user_agent);
 
-    // Fetch subtitles and attachments for this video
+    // Fetch all content data server-side to generate optimized JS
     let subtitles = get_subtitles_for_video(&state.db_pool, &id)
         .await
         .unwrap_or_default();
     let attachments = get_attachments_for_video(&state.db_pool, &id)
         .await
         .unwrap_or_default();
+    let chapters = get_chapters_for_video(&state.db_pool, &id)
+        .await
+        .unwrap_or_default();
 
-    // Build subtitle configuration for ArtPlayer
-    let subtitle_config: Vec<String> = subtitles
-        .iter()
-        .map(|sub| {
-            let name = sub
-                .title
-                .clone()
-                .or_else(|| sub.language.clone())
-                .unwrap_or_else(|| format!("Track {}", sub.track_index));
-            let default = if sub.is_default { "true" } else { "false" };
-            format!(
-                r#"{{ name: "{}", url: "/api/videos/{}/subtitles/{}", default: {} }}"#,
-                name, id, sub.track_index, default
-            )
-        })
-        .collect();
+    let has_subtitles = !subtitles.is_empty();
+    let has_multiple_subtitles = subtitles.len() > 1;
+    let has_fonts = !attachments.is_empty();
+    let has_chapters = !chapters.is_empty();
 
-    // Build font URLs for libass
-    let font_urls: Vec<String> = attachments
-        .iter()
-        .map(|att| format!(r#""/api/videos/{}/attachments/{}""#, id, att.filename))
-        .collect();
+    // Build subtitle configuration for ArtPlayer (only if subtitles exist)
+    let subtitle_js = if has_subtitles {
+        let subtitle_config: Vec<String> = subtitles
+            .iter()
+            .map(|sub| {
+                let name = sub
+                    .title
+                    .clone()
+                    .or_else(|| sub.language.clone())
+                    .unwrap_or_else(|| format!("Track {}", sub.track_index));
+                let default = if sub.is_default { "true" } else { "false" };
+                format!(
+                    r#"{{ name: "{}", url: "/api/videos/{}/subtitles/{}", default: {} }}"#,
+                    name, id, sub.track_index, default
+                )
+            })
+            .collect();
+        format!("const subtitles = [{}];", subtitle_config.join(", "))
+    } else {
+        String::new()
+    };
+
+    // Build font URLs for libass (only if fonts exist)
+    let fonts_js = if has_fonts {
+        let font_urls: Vec<String> = attachments
+            .iter()
+            .map(|att| format!(r#""/api/videos/{}/attachments/{}""#, id, att.filename))
+            .collect();
+        format!("const fonts = [{}];", font_urls.join(", "))
+    } else {
+        String::new()
+    };
+
+    // Build chapters array (only if chapters exist)
+    let chapters_js = if has_chapters {
+        let chapter_config: Vec<String> = chapters
+            .iter()
+            .map(|ch| {
+                format!(
+                    r#"{{ start: {}, end: {}, title: "{}" }}"#,
+                    ch.start_time,
+                    ch.end_time,
+                    ch.title.replace('"', r#"\""#)
+                )
+            })
+            .collect();
+        format!("const chapters = [{}];", chapter_config.join(", "))
+    } else {
+        String::new()
+    };
+
+    // Build plugins array - only include what's needed
+    let mut plugins = vec![
+        r#"artplayerPluginHlsControl({
+                quality: {
+                    control: true,
+                    setting: true,
+                    getName: (level) => level.height + 'P',
+                    title: 'Quality',
+                    auto: 'Auto',
+                },
+            })"#
+        .to_string(),
+    ];
+
+    if has_subtitles {
+        let fonts_param = if has_fonts { "fonts" } else { "[]" };
+        plugins.push(format!(
+            r#"artplayerPluginLibass({{
+                wasmUrl: 'https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.wasm',
+                workerUrl: 'https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.js',
+                fonts: {},
+                availableFonts: {{}},
+                fallbackFont: 'sans-serif',
+            }})"#,
+            fonts_param
+        ));
+    }
+
+    if has_multiple_subtitles {
+        plugins.push("artplayerPluginMultipleSubtitles({ subtitles: subtitles })".to_string());
+    }
+
+    plugins.push("artplayerPluginAutoThumbnail({ width: 160, number: 100 })".to_string());
+
+    if has_chapters {
+        plugins.push("artplayerPluginChapter({ chapters: chapters })".to_string());
+    }
+
+    let plugins_js = plugins.join(",\n            ");
+
+    // Build default subtitle loading code (only if subtitles exist)
+    let default_subtitle_js = if has_subtitles {
+        r#"
+        const defaultSub = subtitles.find(s => s.default) || subtitles[0];
+        if (defaultSub && defaultSub.url) {
+            art.plugins.artplayerPluginLibass?.switch(defaultSub.url);
+        }"#
+    } else {
+        ""
+    };
 
     let js_code = format!(
         r#"
         let viewTracked = false;
         let heartbeatStarted = false;
         let art = null;
+        {subtitle_js}
+        {fonts_js}
+        {chapters_js}
 
-        async function init() {{
-            const subtitles = [{subtitle_list}];
-            const fonts = [{font_list}];
-            
-            // Initialize ArtPlayer with HLS and libass plugins
+        function init() {{
             art = new Artplayer({{
                 container: '#artplayer',
                 url: '/hls/{video_id}/index.m3u8',
@@ -1863,31 +1997,7 @@ pub async fn get_player(
                     crossOrigin: 'anonymous',
                 }},
                 plugins: [
-                    artplayerPluginHlsControl({{
-                        quality: {{
-                            control: true,
-                            setting: true,
-                            getName: (level) => level.height + 'P',
-                            title: 'Quality',
-                            auto: 'Auto',
-                        }},
-                    }}),
-                    ...(subtitles.length > 0 ? [artplayerPluginLibass({{
-                        // libass WASM files - using jsDelivr CDN
-                        wasmUrl: 'https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.wasm',
-                        workerUrl: 'https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.js',
-                        fonts: fonts,
-                        availableFonts: {{}},
-                        fallbackFont: 'sans-serif',
-                    }})] : []),
-                    ...(subtitles.length > 1 ? [artplayerPluginMultipleSubtitles({{
-                        subtitles: subtitles,
-                    }})] : []),
-                    // Auto-generate thumbnails for progress bar preview
-                    artplayerPluginAutoThumbnail({{
-                        width: 160,
-                        number: 100,
-                    }}),
+            {plugins_js}
                 ],
                 customType: {{
                     m3u8: function playM3u8(video, url, art) {{
@@ -1906,20 +2016,9 @@ pub async fn get_player(
                     }},
                 }},
             }});
-
-            // Load default subtitle if available - libass handles ASS/SSA rendering
-            if (subtitles.length > 0) {{
-                const defaultSub = subtitles.find(s => s.default) || subtitles[0];
-                if (defaultSub && defaultSub.url) {{
-                    // libass plugin will handle the subtitle loading
-                    art.plugins.artplayerPluginLibass?.switch(defaultSub.url);
-                }}
-            }}
-
-            // Track view and start heartbeat on first play
+            {default_subtitle_js}
             art.on('play', onFirstPlay);
             art.on('error', onError);
-
             window.art = art;
         }}
 
@@ -1947,50 +2046,60 @@ pub async fn get_player(
 
         document.addEventListener('DOMContentLoaded', init);
         "#,
-        subtitle_list = subtitle_config.join(", "),
-        font_list = font_urls.join(", "),
+        subtitle_js = subtitle_js,
+        fonts_js = fonts_js,
+        chapters_js = chapters_js,
         video_id = id,
+        plugins_js = plugins_js,
+        default_subtitle_js = default_subtitle_js,
     );
 
+    // Minify the JavaScript code
     let session = Session::new();
     let mut out = Vec::new();
     minify(&session, TopLevelMode::Global, js_code.as_bytes(), &mut out).unwrap();
     let minified_js = String::from_utf8(out).unwrap();
 
+    // Build HTML with only the required script tags
+    let mut scripts = vec![
+        r#"<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>"#,
+        r#"<script src="https://cdn.jsdelivr.net/npm/artplayer@5.2.1/dist/artplayer.min.js"></script>"#,
+        r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-hls-control@1.1.1/dist/artplayer-plugin-hls-control.min.js"></script>"#,
+    ];
+
+    if has_subtitles {
+        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-libass@1.0.3/dist/artplayer-plugin-libass.min.js"></script>"#);
+    }
+
+    if has_multiple_subtitles {
+        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-multiple-subtitles@1.0.0/dist/artplayer-plugin-multiple-subtitles.min.js"></script>"#);
+    }
+
+    scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-auto-thumbnail@1.0.1/dist/artplayer-plugin-auto-thumbnail.min.js"></script>"#);
+
+    if has_chapters {
+        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-chapter@1.0.1/dist/artplayer-plugin-chapter.min.js"></script>"#);
+    }
+
+    let scripts_html = scripts.join("\n    ");
+
     let html = format!(
-        r#"
-<!DOCTYPE html>
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Video Player</title>
-    <!-- ArtPlayer CSS -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/artplayer@5.2.1/dist/artplayer.css" />
-    <style>
-        body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }}
-        #artplayer {{ width: 100%; height: 100%; }}
-    </style>
+    <style>body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }} #artplayer {{ width: 100%; height: 100%; }}</style>
 </head>
 <body>
     <div id="artplayer"></div>
-    <!-- HLS.js for HLS playback -->
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-    <!-- ArtPlayer -->
-    <script src="https://cdn.jsdelivr.net/npm/artplayer@5.2.1/dist/artplayer.min.js"></script>
-    <!-- ArtPlayer HLS Control Plugin -->
-    <script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-hls-control@1.1.1/dist/artplayer-plugin-hls-control.min.js"></script>
-    <!-- ArtPlayer Libass Plugin for ASS subtitles -->
-    <script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-libass@1.0.3/dist/artplayer-plugin-libass.min.js"></script>
-    <!-- ArtPlayer Multiple Subtitles Plugin -->
-    <script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-multiple-subtitles@1.0.0/dist/artplayer-plugin-multiple-subtitles.min.js"></script>
-    <!-- ArtPlayer Auto Thumbnail Plugin -->
-    <script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-auto-thumbnail@1.0.1/dist/artplayer-plugin-auto-thumbnail.min.js"></script>
-    <script>{}</script>
+    {scripts_html}
+    <script>{minified_js}</script>
 </body>
-</html>
-"#,
-        minified_js
+</html>"#,
+        scripts_html = scripts_html,
+        minified_js = minified_js,
     );
 
     // Determine cookie attributes based on protocol

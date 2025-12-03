@@ -1,4 +1,6 @@
-use crate::types::{AttachmentInfo, ProgressMap, ProgressUpdate, SubtitleStreamInfo, VideoVariant};
+use crate::types::{
+    AttachmentInfo, ChapterInfo, ProgressMap, ProgressUpdate, SubtitleStreamInfo, VideoVariant,
+};
 use anyhow::{Context, Result};
 use futures::future::try_join_all;
 use std::path::PathBuf;
@@ -151,6 +153,54 @@ pub async fn get_attachments(input: &PathBuf) -> Result<Vec<AttachmentInfo>> {
         .unwrap_or_default();
 
     Ok(attachments)
+}
+
+// Get chapter information from video file using ffprobe
+pub async fn get_chapters(input: &PathBuf) -> Result<Vec<ChapterInfo>> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-show_chapters")
+        .arg("-of")
+        .arg("json")
+        .arg(input)
+        .output()
+        .await
+        .context("failed to run ffprobe for chapters")?;
+
+    if !output.status.success() {
+        // No chapters is not an error
+        return Ok(Vec::new());
+    }
+
+    let json_str = String::from_utf8(output.stdout)?;
+    let v: serde_json::Value = serde_json::from_str(&json_str)?;
+
+    let chapters = v["chapters"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let start_time = c["start_time"]
+                        .as_str()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .or_else(|| c["start_time"].as_f64())?;
+                    let end_time = c["end_time"]
+                        .as_str()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .or_else(|| c["end_time"].as_f64())?;
+                    let title = c["tags"]["title"].as_str().unwrap_or("").to_string();
+                    Some(ChapterInfo {
+                        start_time,
+                        end_time,
+                        title,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(chapters)
 }
 
 // Extract subtitle stream to a file

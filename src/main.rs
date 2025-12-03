@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
             "/videos/{id}/attachments/{filename}",
             get(handlers::get_attachment_file),
         )
+        .route("/videos/{id}/chapters", get(handlers::get_video_chapters))
         .route("/analytics/realtime", get(handlers::get_realtime_analytics))
         .route("/analytics/history", get(handlers::get_analytics_history))
         .route("/analytics/videos", get(handlers::get_analytics_videos))

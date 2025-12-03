@@ -1,4 +1,4 @@
-use crate::types::{Attachment, SubtitleTrack, VideoDto, VideoQuery};
+use crate::types::{Attachment, Chapter, SubtitleTrack, VideoDto, VideoQuery};
 use anyhow::{Context, Result};
 use sqlx::{Sqlite, SqlitePool, migrate::MigrateDatabase};
 use std::collections::HashMap;
@@ -537,4 +537,65 @@ pub async fn get_attachment_by_filename(
         mimetype: r.mimetype,
         storage_key: r.storage_key,
     }))
+}
+
+// Chapter CRUD operations
+
+#[derive(sqlx::FromRow)]
+struct ChapterRow {
+    id: i64,
+    video_id: String,
+    chapter_index: i32,
+    start_time: f64,
+    end_time: f64,
+    title: String,
+}
+
+pub async fn save_chapter(
+    db_pool: &SqlitePool,
+    video_id: &str,
+    chapter_index: i32,
+    start_time: f64,
+    end_time: f64,
+    title: &str,
+) -> Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO chapters (video_id, chapter_index, start_time, end_time, title) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(video_id)
+    .bind(chapter_index)
+    .bind(start_time)
+    .bind(end_time)
+    .bind(title)
+    .execute(db_pool)
+    .await?;
+
+    info!(
+        "Chapter saved to database: video_id={}, index={}, title={}",
+        video_id, chapter_index, title
+    );
+
+    Ok(result.last_insert_rowid())
+}
+
+pub async fn get_chapters_for_video(db_pool: &SqlitePool, video_id: &str) -> Result<Vec<Chapter>> {
+    let rows: Vec<ChapterRow> = sqlx::query_as(
+        "SELECT id, video_id, chapter_index, start_time, end_time, title 
+         FROM chapters WHERE video_id = ? ORDER BY chapter_index",
+    )
+    .bind(video_id)
+    .fetch_all(db_pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| Chapter {
+            id: r.id,
+            video_id: r.video_id,
+            chapter_index: r.chapter_index,
+            start_time: r.start_time,
+            end_time: r.end_time,
+            title: r.title,
+        })
+        .collect())
 }

@@ -182,6 +182,25 @@ pub struct AttachmentInfo {
     pub mimetype: String,
 }
 
+// Chapter metadata (from MKV chapters)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Chapter {
+    pub id: i64,
+    pub video_id: String,
+    pub chapter_index: i32,
+    pub start_time: f64, // Start time in seconds
+    pub end_time: f64,   // End time in seconds
+    pub title: String,
+}
+
+// FFprobe chapter info
+#[derive(Clone, Debug)]
+pub struct ChapterInfo {
+    pub start_time: f64,
+    pub end_time: f64,
+    pub title: String,
+}
+
 // API response types
 #[derive(Serialize)]
 pub struct SubtitleListResponse {
@@ -191,4 +210,9 @@ pub struct SubtitleListResponse {
 #[derive(Serialize)]
 pub struct AttachmentListResponse {
     pub attachments: Vec<Attachment>,
+}
+
+#[derive(Serialize)]
+pub struct ChapterListResponse {
+    pub chapters: Vec<Chapter>,
 }
