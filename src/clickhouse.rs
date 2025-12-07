@@ -3,7 +3,13 @@ use anyhow::{Context, Result};
 use clickhouse::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::info;
+use tokio::time::{Duration, timeout};
+use tracing::{error, info, warn};
+
+/// Timeout for ClickHouse queries
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum retry attempts for failed queries
+const MAX_RETRIES: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize, clickhouse::Row)]
 pub struct ViewRow {
@@ -19,6 +25,10 @@ pub fn initialize_client(config: &ClickHouseConfig) -> Client {
         .with_user(&config.user)
         .with_password(&config.password)
         .with_database(&config.database)
+        // Set connection and query timeouts to prevent hanging on stale connections
+        .with_option("connect_timeout_ms", "5000")
+        .with_option("receive_timeout_ms", "10000")
+        .with_option("send_timeout_ms", "10000")
 }
 
 pub async fn create_schema(client: &Client, config: &ClickHouseConfig) -> Result<()> {
@@ -144,4 +154,87 @@ pub async fn get_analytics_history(client: &Client) -> Result<Vec<HistoryItem>> 
     }
 
     Ok(history)
+}
+
+// ============================================================================
+// Safe wrapper functions with timeout and retry for graceful degradation
+// ============================================================================
+
+/// Get view counts with timeout and graceful fallback.
+/// Returns empty HashMap if ClickHouse is unavailable instead of failing.
+pub async fn get_view_counts_safe(client: &Client, video_ids: &[String]) -> HashMap<String, i64> {
+    if video_ids.is_empty() {
+        return HashMap::new();
+    }
+
+    for attempt in 0..MAX_RETRIES {
+        match timeout(QUERY_TIMEOUT, get_view_counts(client, video_ids)).await {
+            Ok(Ok(counts)) => return counts,
+            Ok(Err(e)) => {
+                warn!(
+                    "ClickHouse get_view_counts failed (attempt {}/{}): {:?}",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    e
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "ClickHouse get_view_counts timed out (attempt {}/{})",
+                    attempt + 1,
+                    MAX_RETRIES
+                );
+            }
+        }
+    }
+
+    error!(
+        "ClickHouse unavailable after {} retries, returning empty view counts",
+        MAX_RETRIES
+    );
+    HashMap::new()
+}
+
+/// Get analytics history with timeout and graceful fallback.
+/// Returns empty Vec if ClickHouse is unavailable instead of failing.
+pub async fn get_analytics_history_safe(client: &Client) -> Vec<HistoryItem> {
+    for attempt in 0..MAX_RETRIES {
+        match timeout(QUERY_TIMEOUT, get_analytics_history(client)).await {
+            Ok(Ok(history)) => return history,
+            Ok(Err(e)) => {
+                warn!(
+                    "ClickHouse get_analytics_history failed (attempt {}/{}): {:?}",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    e
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "ClickHouse get_analytics_history timed out (attempt {}/{})",
+                    attempt + 1,
+                    MAX_RETRIES
+                );
+            }
+        }
+    }
+
+    error!(
+        "ClickHouse unavailable after {} retries, returning empty history",
+        MAX_RETRIES
+    );
+    Vec::new()
+}
+
+/// Insert a view with timeout. Failures are logged but don't cause request failures.
+pub async fn insert_view_safe(client: &Client, video_id: &str, ip: &str, user_agent: &str) {
+    match timeout(QUERY_TIMEOUT, insert_view(client, video_id, ip, user_agent)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            warn!("Failed to insert view into ClickHouse: {:?}", e);
+        }
+        Err(_) => {
+            warn!("ClickHouse insert_view timed out");
+        }
+    }
 }

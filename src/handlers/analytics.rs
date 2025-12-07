@@ -12,7 +12,7 @@ use futures::stream::Stream;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::info;
 
 pub async fn heartbeat(
     State(state): State<AppState>,
@@ -62,17 +62,10 @@ pub async fn track_view(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
-    // Insert view into ClickHouse
-    match crate::clickhouse::insert_view(&state.clickhouse, &video_id, &ip, user_agent).await {
-        Ok(_) => {
-            info!("View tracked for video {}", video_id);
-            StatusCode::OK
-        }
-        Err(e) => {
-            error!("Failed to track view: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
+    // Insert view into ClickHouse (uses safe version that logs failures but doesn't fail the request)
+    crate::clickhouse::insert_view_safe(&state.clickhouse, &video_id, &ip, user_agent).await;
+    info!("View tracked for video {}", video_id);
+    StatusCode::OK
 }
 
 pub async fn get_realtime_analytics(
@@ -108,11 +101,10 @@ pub async fn get_realtime_analytics(
 
 pub async fn get_analytics_history(
     State(state): State<AppState>,
-) -> Result<Json<Vec<crate::clickhouse::HistoryItem>>, (StatusCode, String)> {
-    let history = crate::clickhouse::get_analytics_history(&state.clickhouse)
-        .await
-        .map_err(internal_err)?;
-    Ok(Json(history))
+) -> Json<Vec<crate::clickhouse::HistoryItem>> {
+    // Uses safe version - returns empty vec if ClickHouse is unavailable
+    let history = crate::clickhouse::get_analytics_history_safe(&state.clickhouse).await;
+    Json(history)
 }
 
 #[derive(serde::Serialize)]
@@ -132,10 +124,9 @@ pub async fn get_analytics_videos(
             .await
             .map_err(internal_err)?;
 
+    // Uses safe version - returns empty map if ClickHouse is unavailable
     let video_ids: Vec<String> = videos.iter().map(|v| v.id.clone()).collect();
-    let view_counts = clickhouse::get_view_counts(&state.clickhouse, &video_ids)
-        .await
-        .map_err(internal_err)?;
+    let view_counts = clickhouse::get_view_counts_safe(&state.clickhouse, &video_ids).await;
 
     for video in &mut videos {
         if let Some(&count) = view_counts.get(&video.id) {
