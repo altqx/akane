@@ -1,4 +1,4 @@
-use crate::types::{Attachment, Chapter, SubtitleTrack, VideoDto, VideoQuery};
+use crate::types::{Attachment, AudioTrack, Chapter, SubtitleTrack, VideoDto, VideoQuery};
 use anyhow::{Context, Result};
 use sqlx::{Sqlite, SqlitePool, migrate::MigrateDatabase};
 use std::collections::HashMap;
@@ -377,12 +377,13 @@ pub async fn save_subtitle(
     title: Option<&str>,
     codec: &str,
     storage_key: &str,
+    idx_storage_key: Option<&str>,
     is_default: bool,
     is_forced: bool,
 ) -> Result<i64> {
     let result = sqlx::query(
-        "INSERT INTO subtitles (video_id, track_index, language, title, codec, storage_key, is_default, is_forced) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO subtitles (video_id, track_index, language, title, codec, storage_key, idx_storage_key, is_default, is_forced) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(video_id)
     .bind(track_index)
@@ -390,6 +391,7 @@ pub async fn save_subtitle(
     .bind(title)
     .bind(codec)
     .bind(storage_key)
+    .bind(idx_storage_key)
     .bind(is_default as i32)
     .bind(is_forced as i32)
     .execute(db_pool)
@@ -425,6 +427,7 @@ pub async fn get_subtitles_for_video(
             title: r.title,
             codec: r.codec,
             storage_key: r.storage_key,
+            idx_storage_key: None, // Not stored in DB yet
             is_default: r.is_default != 0,
             is_forced: r.is_forced != 0,
         })
@@ -453,6 +456,7 @@ pub async fn get_subtitle_by_track(
         title: r.title,
         codec: r.codec,
         storage_key: r.storage_key,
+        idx_storage_key: None, // Not stored in DB yet
         is_default: r.is_default != 0,
         is_forced: r.is_forced != 0,
     }))
@@ -537,6 +541,88 @@ pub async fn get_attachment_by_filename(
         mimetype: r.mimetype,
         storage_key: r.storage_key,
     }))
+}
+
+// Audio Track CRUD operations
+
+#[derive(sqlx::FromRow)]
+struct AudioTrackRow {
+    id: i64,
+    video_id: String,
+    track_index: i32,
+    language: Option<String>,
+    title: Option<String>,
+    codec: String,
+    channels: Option<i32>,
+    sample_rate: Option<i32>,
+    bit_rate: Option<i64>,
+    is_default: i32,
+}
+
+#[allow(dead_code)]
+pub async fn save_audio_track(
+    db_pool: &SqlitePool,
+    video_id: &str,
+    track_index: i32,
+    language: Option<&str>,
+    title: Option<&str>,
+    codec: &str,
+    channels: Option<i32>,
+    sample_rate: Option<i32>,
+    bit_rate: Option<i64>,
+    is_default: bool,
+) -> Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO audio_tracks (video_id, track_index, language, title, codec, channels, sample_rate, bit_rate, is_default) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(video_id)
+    .bind(track_index)
+    .bind(language)
+    .bind(title)
+    .bind(codec)
+    .bind(channels)
+    .bind(sample_rate)
+    .bind(bit_rate)
+    .bind(is_default as i32)
+    .execute(db_pool)
+    .await?;
+
+    info!(
+        "Audio track saved to database: video_id={}, track_index={}, codec={}",
+        video_id, track_index, codec
+    );
+
+    Ok(result.last_insert_rowid())
+}
+
+pub async fn get_audio_tracks_for_video(
+    db_pool: &SqlitePool,
+    video_id: &str,
+) -> Result<Vec<AudioTrack>> {
+    let rows: Vec<AudioTrackRow> = sqlx::query_as(
+        "SELECT id, video_id, track_index, language, title, codec, channels, sample_rate, bit_rate, is_default 
+         FROM audio_tracks WHERE video_id = ? ORDER BY track_index ASC"
+    )
+    .bind(video_id)
+    .fetch_all(db_pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| AudioTrack {
+            id: r.id,
+            video_id: r.video_id,
+            track_index: r.track_index,
+            language: r.language,
+            title: r.title,
+            codec: r.codec,
+            channels: r.channels,
+            sample_rate: r.sample_rate,
+            bit_rate: r.bit_rate,
+            is_default: r.is_default != 0,
+        })
+        .collect())
 }
 
 // Chapter CRUD operations

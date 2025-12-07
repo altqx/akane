@@ -6,8 +6,9 @@ use crate::types::{
     ProgressResponse, ProgressUpdate, QueueItem, QueueListResponse, UploadAccepted, UploadResponse,
 };
 use crate::video::{
-    encode_to_hls, extract_all_attachments, extract_subtitle, get_attachments, get_chapters,
-    get_subtitle_streams, get_variants_for_height, get_video_duration, get_video_height,
+    encode_to_hls, extract_all_attachments, extract_subtitle, get_attachments, get_audio_streams,
+    get_chapters, get_subtitle_streams, get_variants_for_height, get_video_duration,
+    get_video_height,
 };
 
 use axum::{
@@ -208,6 +209,11 @@ pub async fn upload_video(
             };
             update_progress(&state_clone.progress, &upload_id_clone, encoding_progress).await;
 
+            // Get audio streams for multi-audio encoding
+            let audio_streams = get_audio_streams(&video_path_clone)
+                .await
+                .unwrap_or_default();
+
             encode_to_hls(
                 &video_path_clone,
                 &hls_dir,
@@ -216,6 +222,7 @@ pub async fn upload_video(
                 state_clone.ffmpeg_semaphore.clone(),
                 &state_clone.config.video.encoder,
                 video_duration,
+                &audio_streams,
             )
             .await?;
 
@@ -310,6 +317,7 @@ pub async fn upload_video(
                     sub.title.as_deref(),
                     &sub.codec_name,
                     &storage_key,
+                    None, // idx_storage_key for VobSub
                     sub.is_default,
                     sub.is_forced,
                 )
@@ -726,6 +734,11 @@ pub async fn finalize_chunked_upload(
             };
             update_progress(&state_clone.progress, &upload_id_clone, encoding_progress).await;
 
+            // Get audio streams for multi-audio encoding
+            let audio_streams = get_audio_streams(&video_path_clone)
+                .await
+                .unwrap_or_default();
+
             encode_to_hls(
                 &video_path_clone,
                 &hls_dir,
@@ -734,6 +747,7 @@ pub async fn finalize_chunked_upload(
                 state_clone.ffmpeg_semaphore.clone(),
                 &state_clone.config.video.encoder,
                 video_duration,
+                &audio_streams,
             )
             .await?;
 
@@ -828,6 +842,7 @@ pub async fn finalize_chunked_upload(
                     sub.title.as_deref(),
                     &sub.codec_name,
                     &storage_key,
+                    None, // idx_storage_key for VobSub
                     sub.is_default,
                     sub.is_forced,
                 )

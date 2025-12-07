@@ -13,8 +13,8 @@ pub use analytics::{
 #[allow(unused)]
 pub use common::{internal_err, minify_js};
 pub use content::{
-    get_attachment_file, get_jassub_worker, get_subtitle_file, get_video_attachments,
-    get_video_chapters, get_video_subtitles,
+    get_attachment_file, get_jassub_worker, get_libbitsub_worker, get_subtitle_file,
+    get_video_attachments, get_video_audio_tracks, get_video_chapters, get_video_subtitles,
 };
 pub use player::{get_hls_file, get_player};
 

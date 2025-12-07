@@ -44,11 +44,10 @@ pub async fn get_player(
         .unwrap_or_default();
 
     let has_subtitles = !subtitles.is_empty();
-    let has_multiple_subtitles = subtitles.len() > 1;
     let has_fonts = !attachments.is_empty();
     let has_chapters = !chapters.is_empty();
 
-    // Build subtitle configuration for ArtPlayer (only if subtitles exist)
+    // Build subtitle data for JavaScript
     let subtitle_js = if has_subtitles {
         let subtitle_config: Vec<String> = subtitles
             .iter()
@@ -60,25 +59,26 @@ pub async fn get_player(
                     .unwrap_or_else(|| format!("Track {}", sub.track_index));
                 let escaped_name =
                     serde_json::to_string(&name).unwrap_or_else(|_| r#""""#.to_string());
-                let default = if sub.is_default { "true" } else { "false" };
-                // Add file extension based on codec for libass to detect ASS files
                 let ext = match sub.codec.as_str() {
                     "ass" | "ssa" => "ass",
                     "subrip" | "srt" => "srt",
+                    "hdmv_pgs_subtitle" | "pgssub" => "sup",
+                    "dvd_subtitle" | "dvdsub" => "sub",
                     _ => "ass",
                 };
+                let codec_escaped = serde_json::to_string(&sub.codec).unwrap_or_else(|_| r#""""#.to_string());
                 format!(
-                    r#"{{ name: {}, url: "/api/videos/{}/subtitles/{}.{}", default: {} }}"#,
-                    escaped_name, id, sub.track_index, ext, default
+                    r#"{{ name: {}, url: "/api/videos/{}/subtitles/{}.{}", codec: {}, default: {} }}"#,
+                    escaped_name, id, sub.track_index, ext, codec_escaped, sub.is_default
                 )
             })
             .collect();
         format!("const subtitles = [{}];", subtitle_config.join(", "))
     } else {
-        String::new()
+        "const subtitles = [];".to_string()
     };
 
-    // Build font URLs for libass (only if fonts exist)
+    // Build font URLs for JASSUB (only if fonts exist)
     let fonts_js = if has_fonts {
         let font_urls: Vec<String> = attachments
             .iter()
@@ -87,10 +87,10 @@ pub async fn get_player(
         let json = serde_json::to_string(&font_urls).unwrap_or_else(|_| "[]".to_string());
         format!("const fonts = {};", json)
     } else {
-        String::new()
+        "const fonts = [];".to_string()
     };
 
-    // Build chapters array (only if chapters exist) - filter invalid time points
+    // Build chapters array (only if chapters exist)
     let chapters_js = if has_chapters {
         let chapter_config: Vec<String> = chapters
             .iter()
@@ -105,264 +105,352 @@ pub async fn get_player(
             })
             .collect();
         if chapter_config.is_empty() {
-            String::new()
+            "const chapters = [];".to_string()
         } else {
             format!("const chapters = [{}];", chapter_config.join(", "))
         }
     } else {
-        String::new()
-    };
-
-    // Build plugins array - only include what's needed
-    let mut plugins = vec![
-        r#"artplayerPluginHlsControl({
-                quality: {
-                    control: true,
-                    setting: true,
-                    getName: (level) => level.height + 'P',
-                    title: 'Quality',
-                    auto: 'Auto',
-                },
-            })"#
-        .to_string(),
-    ];
-
-    // Only add chapter plugin if we have valid chapters
-    let has_valid_chapters = has_chapters
-        && chapters
-            .iter()
-            .any(|ch| ch.start_time >= 0.0 && ch.end_time > ch.start_time);
-    if has_valid_chapters {
-        plugins.push("artplayerPluginChapter({ chapters: chapters })".to_string());
-    }
-
-    let plugins_js = plugins.join(",\n            ");
-
-    // Build JASSUB initialization code (only if subtitles exist)
-    let default_sub = subtitles
-        .iter()
-        .find(|s| s.is_default)
-        .or_else(|| subtitles.first());
-    let jassub_init_js = if let Some(sub) = default_sub {
-        let ext = match sub.codec.as_str() {
-            "ass" | "ssa" => "ass",
-            "subrip" | "srt" => "srt",
-            _ => "ass",
-        };
-        let fonts_array = if has_fonts { "fonts" } else { "[]" };
-        let default_sub_url = format!("/api/videos/{}/subtitles/{}.{}", id, sub.track_index, ext);
-
-        // Build subtitle selector if multiple subtitles exist
-        let subtitle_selector = if has_multiple_subtitles {
-            r#"
-                // Add subtitle selector to settings
-                art.setting.add({
-                    name: 'subtitle',
-                    html: 'Subtitle',
-                    tooltip: subtitles.find(s => s.default)?.name || subtitles[0]?.name || 'None',
-                    selector: [
-                        { html: 'Off', value: 'off' },
-                        ...subtitles.map(s => ({ html: s.name, url: s.url, default: s.default }))
-                    ],
-                    onSelect: function(item) {
-                        if (item.value === 'off') {
-                            window.subtitlesEnabled = false;
-                            updateToggleButton();
-                            if (window.jassub) {
-                                window.jassub.freeTrack();
-                            }
-                        } else if (item.url) {
-                            window.subtitlesEnabled = true;
-                            window.currentSubUrl = item.url;
-                            updateToggleButton();
-                            if (window.jassub) {
-                                window.jassub.setTrackByUrl(item.url);
-                            }
-                        }
-                        return item.html;
-                    },
-                });"#
-                .to_string()
-        } else {
-            String::new()
-        };
-
-        format!(
-            r#"
-            // Initialize JASSUB for ASS subtitle rendering after Artplayer is ready
-            art.on('ready', function() {{
-                // Subtitle state management
-                window.subtitlesEnabled = true;
-                window.currentSubUrl = '{default_sub_url}';
-                
-                function updateToggleButton() {{
-                    const toggleEl = document.querySelector('.art-control-subtitle-toggle');
-                    if (toggleEl) {{
-                        toggleEl.style.opacity = window.subtitlesEnabled ? '1' : '0.5';
-                    }}
-                }}
-
-                console.log('Artplayer ready, initializing JASSUB...');
-                console.log('Video element:', art.video);
-                console.log('subUrl:', window.currentSubUrl);
-                console.log('fonts:', {fonts_array});
-                
-                try {{
-                    window.jassub = new JASSUB({{
-                        video: art.video,
-                        subUrl: window.currentSubUrl,
-                        workerUrl: '/jassub/jassub-worker.js',
-                        wasmUrl: '/jassub/jassub-worker.wasm',
-                        fonts: {fonts_array},
-                        fallbackFont: 'Arial',
-                    }});
-                    console.log('JASSUB initialized:', window.jassub);
-                }} catch (e) {{
-                    console.error('JASSUB initialization error:', e);
-                }}
-
-                // Add subtitle toggle button to controls
-                art.controls.add({{
-                    name: 'subtitle-toggle',
-                    position: 'right',
-                    index: 10,
-                    html: '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V6h16v12zM6 10h2v2H6zm0 4h8v2H6zm10 0h2v2h-2zm-6-4h8v2h-8z"/></svg>',
-                    tooltip: 'Toggle Subtitles',
-                    style: {{ color: '#fff' }},
-                    click: function() {{
-                        window.subtitlesEnabled = !window.subtitlesEnabled;
-                        updateToggleButton();
-                        if (window.jassub) {{
-                            if (window.subtitlesEnabled && window.currentSubUrl) {{
-                                window.jassub.setTrackByUrl(window.currentSubUrl);
-                            }} else {{
-                                window.jassub.freeTrack();
-                            }}
-                        }}
-                    }},
-                }});
-                {subtitle_selector}
-            }});"#,
-            default_sub_url = default_sub_url,
-            fonts_array = fonts_array,
-            subtitle_selector = subtitle_selector
-        )
-    } else {
-        String::new()
+        "const chapters = [];".to_string()
     };
 
     let js_code = format!(
         r#"
-        let viewTracked = false;
-        let heartbeatStarted = false;
-        let art = null;
+        const videoId = '{video_id}';
         {subtitle_js}
         {fonts_js}
         {chapters_js}
+        
+        let player = null;
+        let video = null;
+        let jassub = null;
+        let bitmapRenderer = null;
+        let viewTracked = false;
+        let heartbeatStarted = false;
+        let currentSubtitle = null;
+        let subtitlesEnabled = true;
 
-        function init() {{
-            // Get saved settings from Artplayer's localStorage
-            let savedSettings = {{}};
-            try {{
-                savedSettings = JSON.parse(localStorage.getItem('artplayer_settings')) || {{}};
-            }} catch {{}}
-            const savedQualityLevel = savedSettings.qualityLevel;
-            const savedPlaybackRate = savedSettings.playbackRate;
-            
-            art = new Artplayer({{
-                container: '#artplayer',
-                url: '/hls/{video_id}/index.m3u8',
-                type: 'm3u8',
-                autoplay: true,
-                autoSize: false,
-                autoMini: false,
-                loop: false,
-                flip: true,
-                playbackRate: true,
-                aspectRatio: true,
-                setting: true,
-                hotkey: true,
-                pip: true,
-                mutex: true,
-                fullscreen: true,
-                fullscreenWeb: true,
-                subtitleOffset: true,
-                miniProgressBar: true,
-                localVideo: false,
-                localSubtitle: false,
-                volume: 1,
-                isLive: false,
-                muted: false,
-                autoPlayback: true,
-                airplay: true,
-                theme: '#ff0000',
-                lang: 'en',
-                thumbnails: {{
-                    url: '/hls/{video_id}/sprites.jpg',
-                    number: 100,
-                    column: 10,
-                }},
-                moreVideoAttr: {{
-                    crossOrigin: 'anonymous',
-                }},
-                plugins: [
-            {plugins_js}
-                ],
-                customType: {{
-                    m3u8: function playM3u8(video, url, art) {{
-                        if (Hls.isSupported()) {{
-                            if (art.hls) art.hls.destroy();
-                            const hls = new Hls();
-                            hls.loadSource(url);
-                            hls.attachMedia(video);
-                            art.hls = hls;
-                            art.on('destroy', () => hls.destroy());
-                            
-                            // Restore saved quality level after HLS manifest is loaded
-                            hls.on(Hls.Events.MANIFEST_PARSED, function() {{
-                                if (savedQualityLevel !== undefined && savedQualityLevel >= -1 && savedQualityLevel < hls.levels.length) {{
-                                    hls.currentLevel = savedQualityLevel;
-                                }}
-                            }});
-                            
-                            // Save quality level when changed
-                            hls.on(Hls.Events.LEVEL_SWITCHED, function(event, data) {{
-                                art.storage.set('qualityLevel', data.level);
-                            }});
-                        }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
-                            video.src = url;
-                        }} else {{
-                            art.notice.show = 'Unsupported playback format: m3u8';
-                        }}
-                    }},
-                }},
-            }});
-            
-            // Restore and persist playback rate
-            art.on('ready', function() {{
-                if (savedPlaybackRate && savedPlaybackRate !== 1) {{
-                    art.playbackRate = savedPlaybackRate;
-                }}
-            }});
-            
-            art.on('video:ratechange', function() {{
-                art.storage.set('playbackRate', art.playbackRate);
-            }});
-            
-            {jassub_init_js}
-            art.on('play', onFirstPlay);
-            art.on('error', onError);
-            window.art = art;
+        // Subtitle type detection
+        function needsJassub(codec) {{
+            return ['ass','ssa','subrip','srt'].includes(codec?.toLowerCase());
+        }}
+        function isPgsSubtitle(codec) {{
+            return ['hdmv_pgs_subtitle','pgssub'].includes(codec?.toLowerCase());
+        }}
+        function isVobSubSubtitle(codec) {{
+            return ['dvd_subtitle','dvdsub'].includes(codec?.toLowerCase());
         }}
 
-        function onFirstPlay() {{
-            if (!viewTracked) {{
-                viewTracked = true;
-                fetch('/api/videos/{video_id}/view', {{ method: 'POST' }});
+        // Format time as HH:MM:SS or MM:SS
+        function formatTime(seconds) {{
+            if (!isFinite(seconds)) return '0:00';
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+            if (h > 0) return h + ':' + m.toString().padStart(2,'0') + ':' + s.toString().padStart(2,'0');
+            return m + ':' + s.toString().padStart(2,'0');
+        }}
+
+        async function init() {{
+            video = document.getElementById('video');
+            const playBtn = document.getElementById('playBtn');
+            const progress = document.getElementById('progress');
+            const progressBar = document.getElementById('progressBar');
+            const buffered = document.getElementById('buffered');
+            const currentTimeEl = document.getElementById('currentTime');
+            const durationEl = document.getElementById('duration');
+            const volumeSlider = document.getElementById('volumeSlider');
+            const volumeBtn = document.getElementById('volumeBtn');
+            const fullscreenBtn = document.getElementById('fullscreenBtn');
+            const qualityBtn = document.getElementById('qualityBtn');
+            const qualityMenu = document.getElementById('qualityMenu');
+            const subtitleBtn = document.getElementById('subtitleBtn');
+            const subtitleMenu = document.getElementById('subtitleMenu');
+            const controls = document.getElementById('controls');
+            const container = document.getElementById('container');
+            const loading = document.getElementById('loading');
+
+            // Initialize Shaka Player
+            shaka.polyfill.installAll();
+            if (!shaka.Player.isBrowserSupported()) {{
+                console.error('Shaka Player not supported');
+                return;
             }}
-            if (!heartbeatStarted) {{
-                heartbeatStarted = true;
-                startHeartbeat();
+            player = new shaka.Player();
+            await player.attach(video);
+            player.configure({{
+                streaming: {{
+                    bufferingGoal: 30,
+                    rebufferingGoal: 2,
+                    bufferBehind: 30
+                }}
+            }});
+
+            // Load HLS stream
+            try {{
+                await player.load('/hls/{video_id}/index.m3u8');
+                loading.style.display = 'none';
+            }} catch (e) {{
+                console.error('Failed to load video:', e);
+            }}
+
+            // Initialize subtitle if available
+            if (subtitles.length > 0) {{
+                const defaultSub = subtitles.find(s => s.default) || subtitles[0];
+                await loadSubtitle(defaultSub);
+                buildSubtitleMenu();
+            }}
+
+            // Build quality menu
+            buildQualityMenu();
+
+            // Play/Pause
+            playBtn.onclick = togglePlay;
+            video.onclick = togglePlay;
+
+            function togglePlay() {{
+                if (video.paused) {{
+                    video.play();
+                }} else {{
+                    video.pause();
+                }}
+            }}
+
+            video.onplay = () => {{
+                playBtn.innerHTML = pauseIcon;
+                if (!viewTracked) {{
+                    viewTracked = true;
+                    fetch('/api/videos/{video_id}/view', {{ method: 'POST' }});
+                }}
+                if (!heartbeatStarted) {{
+                    heartbeatStarted = true;
+                    startHeartbeat();
+                }}
+            }};
+            video.onpause = () => {{ playBtn.innerHTML = playIcon; }};
+
+            // Progress bar
+            video.ontimeupdate = () => {{
+                if (video.duration) {{
+                    const pct = (video.currentTime / video.duration) * 100;
+                    progressBar.style.width = pct + '%';
+                    currentTimeEl.textContent = formatTime(video.currentTime);
+                }}
+            }};
+            video.ondurationchange = () => {{
+                durationEl.textContent = formatTime(video.duration);
+            }};
+            video.onprogress = () => {{
+                if (video.buffered.length > 0 && video.duration) {{
+                    const end = video.buffered.end(video.buffered.length - 1);
+                    buffered.style.width = (end / video.duration) * 100 + '%';
+                }}
+            }};
+            progress.onclick = (e) => {{
+                const rect = progress.getBoundingClientRect();
+                const pct = (e.clientX - rect.left) / rect.width;
+                video.currentTime = pct * video.duration;
+            }};
+
+            // Volume
+            volumeSlider.oninput = () => {{
+                video.volume = volumeSlider.value;
+                video.muted = video.volume === 0;
+                updateVolumeIcon();
+            }};
+            volumeBtn.onclick = () => {{
+                video.muted = !video.muted;
+                updateVolumeIcon();
+            }};
+            function updateVolumeIcon() {{
+                if (video.muted || video.volume === 0) {{
+                    volumeBtn.innerHTML = muteIcon;
+                }} else {{
+                    volumeBtn.innerHTML = volumeIcon;
+                }}
+            }}
+
+            // Fullscreen
+            fullscreenBtn.onclick = () => {{
+                if (document.fullscreenElement) {{
+                    document.exitFullscreen();
+                }} else {{
+                    container.requestFullscreen();
+                }}
+            }};
+            document.onfullscreenchange = () => {{
+                if (document.fullscreenElement) {{
+                    fullscreenBtn.innerHTML = exitFsIcon;
+                }} else {{
+                    fullscreenBtn.innerHTML = fsIcon;
+                }}
+            }};
+
+            // Menus
+            qualityBtn.onclick = (e) => {{
+                e.stopPropagation();
+                subtitleMenu.classList.remove('show');
+                qualityMenu.classList.toggle('show');
+            }};
+            subtitleBtn.onclick = (e) => {{
+                e.stopPropagation();
+                qualityMenu.classList.remove('show');
+                subtitleMenu.classList.toggle('show');
+            }};
+            document.onclick = () => {{
+                qualityMenu.classList.remove('show');
+                subtitleMenu.classList.remove('show');
+            }};
+
+            // Keyboard shortcuts
+            document.onkeydown = (e) => {{
+                if (e.target.tagName === 'INPUT') return;
+                switch(e.key.toLowerCase()) {{
+                    case ' ':
+                    case 'k':
+                        e.preventDefault();
+                        togglePlay();
+                        break;
+                    case 'f':
+                        e.preventDefault();
+                        fullscreenBtn.click();
+                        break;
+                    case 'm':
+                        e.preventDefault();
+                        video.muted = !video.muted;
+                        updateVolumeIcon();
+                        break;
+                    case 'arrowleft':
+                        e.preventDefault();
+                        video.currentTime = Math.max(0, video.currentTime - 5);
+                        break;
+                    case 'arrowright':
+                        e.preventDefault();
+                        video.currentTime = Math.min(video.duration, video.currentTime + 5);
+                        break;
+                    case 'j':
+                        e.preventDefault();
+                        video.currentTime = Math.max(0, video.currentTime - 10);
+                        break;
+                    case 'l':
+                        e.preventDefault();
+                        video.currentTime = Math.min(video.duration, video.currentTime + 10);
+                        break;
+                }}
+            }};
+
+            // Auto-hide controls
+            let hideTimeout;
+            container.onmousemove = () => {{
+                controls.classList.add('show');
+                clearTimeout(hideTimeout);
+                hideTimeout = setTimeout(() => {{
+                    if (!video.paused) controls.classList.remove('show');
+                }}, 3000);
+            }};
+            container.onmouseleave = () => {{
+                if (!video.paused) controls.classList.remove('show');
+            }};
+            controls.classList.add('show');
+        }}
+
+        function buildQualityMenu() {{
+            const menu = document.getElementById('qualityMenu');
+            const tracks = player.getVariantTracks();
+            const heights = [...new Set(tracks.map(t => t.height))].sort((a,b) => b - a);
+            
+            menu.innerHTML = '<div class="menu-item" data-value="-1">Auto</div>';
+            heights.forEach(h => {{
+                menu.innerHTML += '<div class="menu-item" data-value="' + h + '">' + h + 'p</div>';
+            }});
+
+            menu.querySelectorAll('.menu-item').forEach(item => {{
+                item.onclick = (e) => {{
+                    e.stopPropagation();
+                    const val = parseInt(item.dataset.value);
+                    if (val === -1) {{
+                        player.configure({{ abr: {{ enabled: true }} }});
+                    }} else {{
+                        player.configure({{ abr: {{ enabled: false }} }});
+                        const track = tracks.find(t => t.height === val);
+                        if (track) player.selectVariantTrack(track, true);
+                    }}
+                    menu.querySelectorAll('.menu-item').forEach(i => i.classList.remove('active'));
+                    item.classList.add('active');
+                    menu.classList.remove('show');
+                }};
+            }});
+            menu.querySelector('.menu-item').classList.add('active');
+        }}
+
+        function buildSubtitleMenu() {{
+            const menu = document.getElementById('subtitleMenu');
+            menu.innerHTML = '<div class="menu-item" data-idx="-1">Off</div>';
+            subtitles.forEach((sub, idx) => {{
+                menu.innerHTML += '<div class="menu-item" data-idx="' + idx + '">' + sub.name + '</div>';
+            }});
+
+            menu.querySelectorAll('.menu-item').forEach(item => {{
+                item.onclick = async (e) => {{
+                    e.stopPropagation();
+                    const idx = parseInt(item.dataset.idx);
+                    menu.querySelectorAll('.menu-item').forEach(i => i.classList.remove('active'));
+                    item.classList.add('active');
+                    if (idx === -1) {{
+                        destroySubtitleRenderer();
+                        currentSubtitle = null;
+                    }} else {{
+                        await loadSubtitle(subtitles[idx]);
+                    }}
+                    menu.classList.remove('show');
+                }};
+            }});
+            // Select default
+            const defIdx = subtitles.findIndex(s => s.default);
+            const activeIdx = defIdx >= 0 ? defIdx : 0;
+            menu.querySelectorAll('.menu-item')[activeIdx + 1]?.classList.add('active');
+        }}
+
+        function destroySubtitleRenderer() {{
+            if (jassub) {{ try {{ jassub.destroy(); }} catch {{}} jassub = null; }}
+            if (bitmapRenderer) {{ try {{ bitmapRenderer.destroy(); }} catch {{}} bitmapRenderer = null; }}
+        }}
+
+        async function loadSubtitle(sub) {{
+            destroySubtitleRenderer();
+            currentSubtitle = sub;
+
+            if (needsJassub(sub.codec)) {{
+                try {{
+                    jassub = new JASSUB({{
+                        video: video,
+                        subUrl: sub.url,
+                        workerUrl: '/jassub/jassub-worker.js',
+                        wasmUrl: '/jassub/jassub-worker.wasm',
+                        fonts: fonts,
+                        fallbackFont: 'Arial',
+                    }});
+                }} catch (e) {{ console.error('JASSUB error:', e); }}
+            }} else if (isPgsSubtitle(sub.codec)) {{
+                try {{
+                    const libbitsub = await import('/libbitsub/libbitsub.js');
+                    await libbitsub.default();
+                    bitmapRenderer = new libbitsub.PgsRenderer({{
+                        video: video,
+                        subUrl: sub.url,
+                        workerUrl: '/libbitsub/libbitsub.js'
+                    }});
+                }} catch (e) {{ console.error('PGS renderer error:', e); }}
+            }} else if (isVobSubSubtitle(sub.codec)) {{
+                try {{
+                    const libbitsub = await import('/libbitsub/libbitsub.js');
+                    await libbitsub.default();
+                    const idxUrl = sub.url.replace(/\\.sub$/, '.idx');
+                    bitmapRenderer = new libbitsub.VobSubRenderer({{
+                        video: video,
+                        subUrl: sub.url,
+                        idxUrl: idxUrl
+                    }});
+                }} catch (e) {{ console.error('VobSub renderer error:', e); }}
             }}
         }}
 
@@ -373,38 +461,34 @@ pub async fn get_player(
             }}, 10000);
         }}
 
-        function onError(error) {{
-            console.error('Player error:', error);
-        }}
+        // SVG Icons
+        const playIcon = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>';
+        const pauseIcon = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
+        const volumeIcon = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
+        const muteIcon = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
+        const fsIcon = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
+        const exitFsIcon = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>';
 
         document.addEventListener('DOMContentLoaded', init);
         "#,
+        video_id = id,
         subtitle_js = subtitle_js,
         fonts_js = fonts_js,
         chapters_js = chapters_js,
-        video_id = id,
-        plugins_js = plugins_js,
-        jassub_init_js = jassub_init_js,
     );
 
-    // Simple regex-based JS minification (safe, no panics)
+    // Minify JS
     let minified_js = minify_js(&js_code);
 
-    // Build HTML with only the required script tags
+    // Build HTML with Shaka Player and custom skin
     let mut scripts = vec![
-        r#"<script src="https://cdn.jsdelivr.net/npm/hls.js/dist/hls.min.js"></script>"#,
-        r#"<script src="https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.min.js"></script>"#,
-        r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-hls-control/dist/artplayer-plugin-hls-control.min.js"></script>"#,
+        r#"<script src="https://cdn.jsdelivr.net/npm/shaka-player/dist/shaka-player.compiled.min.js"></script>"#,
     ];
 
     if has_subtitles {
         scripts.push(
             r#"<script src="https://cdn.jsdelivr.net/npm/jassub/dist/jassub.umd.js"></script>"#,
         );
-    }
-
-    if has_valid_chapters {
-        scripts.push(r#"<script src="https://cdn.jsdelivr.net/npm/artplayer-plugin-chapter/dist/artplayer-plugin-chapter.min.js"></script>"#);
     }
 
     let scripts_html = scripts.join("\n    ");
@@ -417,14 +501,79 @@ pub async fn get_player(
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Video Player</title>
     <style>
-        body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }}
-        #artplayer {{ width: 100%; height: 100%; position: relative; }}
-        /* Ensure JASSUB canvas is visible above video */
-        #artplayer canvas {{ position: absolute; top: 0; left: 0; pointer-events: none; z-index: 10; }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ background: #000; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }}
+        #container {{ position: relative; width: 100%; height: 100vh; background: #000; overflow: hidden; }}
+        #video {{ width: 100%; height: 100%; object-fit: contain; }}
+        #loading {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #fff; font-size: 18px; }}
+        
+        /* Custom Controls */
+        #controls {{
+            position: absolute; bottom: 0; left: 0; right: 0;
+            background: linear-gradient(transparent, rgba(0,0,0,0.9));
+            padding: 60px 20px 15px; display: flex; flex-wrap: wrap;
+            align-items: center; gap: 12px; opacity: 0; transition: opacity 0.3s;
+        }}
+        #controls.show {{ opacity: 1; }}
+        
+        /* Progress Bar */
+        #progress {{ flex: 100%; height: 5px; background: rgba(255,255,255,0.2); cursor: pointer; border-radius: 3px; position: relative; }}
+        #buffered {{ position: absolute; height: 100%; background: rgba(255,255,255,0.4); border-radius: 3px; }}
+        #progressBar {{ position: absolute; height: 100%; background: #e50914; border-radius: 3px; }}
+        #progress:hover {{ height: 7px; }}
+        
+        /* Buttons */
+        .ctrl-btn {{ background: none; border: none; color: #fff; width: 36px; height: 36px; cursor: pointer; padding: 6px; display: flex; align-items: center; justify-content: center; }}
+        .ctrl-btn:hover {{ background: rgba(255,255,255,0.1); border-radius: 4px; }}
+        .ctrl-btn svg {{ width: 24px; height: 24px; }}
+        
+        /* Time Display */
+        #time {{ color: #fff; font-size: 13px; white-space: nowrap; }}
+        
+        /* Volume */
+        #volumeWrap {{ display: flex; align-items: center; }}
+        #volumeSlider {{ width: 0; opacity: 0; transition: all 0.2s; height: 4px; cursor: pointer; accent-color: #e50914; }}
+        #volumeWrap:hover #volumeSlider {{ width: 80px; opacity: 1; margin-left: 8px; }}
+        
+        /* Spacer */
+        .spacer {{ flex: 1; }}
+        
+        /* Menus */
+        .menu-wrap {{ position: relative; }}
+        .menu {{ position: absolute; bottom: 100%; right: 0; background: rgba(28,28,28,0.95); border-radius: 6px; padding: 8px 0; min-width: 120px; display: none; }}
+        .menu.show {{ display: block; }}
+        .menu-item {{ padding: 10px 16px; color: #fff; font-size: 14px; cursor: pointer; }}
+        .menu-item:hover {{ background: rgba(255,255,255,0.1); }}
+        .menu-item.active {{ color: #e50914; }}
     </style>
 </head>
 <body>
-    <div id="artplayer"></div>
+    <div id="container">
+        <video id="video" autoplay playsinline></video>
+        <div id="loading">Loading...</div>
+        <div id="controls">
+            <div id="progress">
+                <div id="buffered"></div>
+                <div id="progressBar"></div>
+            </div>
+            <button id="playBtn" class="ctrl-btn"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></button>
+            <div id="volumeWrap">
+                <button id="volumeBtn" class="ctrl-btn"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg></button>
+                <input type="range" id="volumeSlider" min="0" max="1" step="0.1" value="1">
+            </div>
+            <div id="time"><span id="currentTime">0:00</span> / <span id="duration">0:00</span></div>
+            <div class="spacer"></div>
+            <div class="menu-wrap">
+                <button id="subtitleBtn" class="ctrl-btn"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V6h16v12zM6 10h2v2H6zm0 4h8v2H6zm10 0h2v2h-2zm-6-4h8v2h-8z"/></svg></button>
+                <div id="subtitleMenu" class="menu"></div>
+            </div>
+            <div class="menu-wrap">
+                <button id="qualityBtn" class="ctrl-btn"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M19 6h-2V4H7v2H5c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H5V8h14v10zm-6-1l4-4-4-4v3H9v2h4v3z"/></svg></button>
+                <div id="qualityMenu" class="menu"></div>
+            </div>
+            <button id="fullscreenBtn" class="ctrl-btn"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg></button>
+        </div>
+    </div>
     {scripts_html}
     <script>{minified_js}</script>
 </body>
@@ -464,7 +613,6 @@ pub async fn get_hls_file(
     let key = format!("{}/{}", id, file);
 
     // Verify token for HLS files (.m3u8, .ts)
-    // Subtitles and fonts are now served through dedicated API endpoints
     if file.ends_with(".m3u8") || file.ends_with(".ts") {
         // Extract token from Cookie header
         let cookie_header = headers
@@ -481,7 +629,7 @@ pub async fn get_hls_file(
             }
         }
 
-        // Try to get the real client IP from X-Forwarded-For header, fallback to addr.ip()
+        // Try to get the real client IP from X-Forwarded-For header
         let ip = headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
@@ -503,7 +651,7 @@ pub async fn get_hls_file(
         }
     }
 
-    // Fetch content from S3 for all file types (Proxy)
+    // Fetch content from S3
     let content = state
         .s3
         .get_object()
@@ -513,16 +661,9 @@ pub async fn get_hls_file(
         .await
         .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
 
-    // Stream the body directly instead of collecting into memory
     let reader = content.body.into_async_read();
     let stream = tokio_util::io::ReaderStream::new(reader);
-
-    // Convert Byte stream to Frame stream for Axum Body
-    let body_stream = stream.map(|result| {
-        result // Ensure it's Bytes
-            .map_err(std::io::Error::other)
-    });
-
+    let body_stream = stream.map(|result| result.map_err(std::io::Error::other));
     let body = Body::from_stream(body_stream);
 
     // Determine Content-Type

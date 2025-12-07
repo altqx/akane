@@ -1,9 +1,12 @@
 use crate::database::{
-    get_attachment_by_filename, get_attachments_for_video, get_chapters_for_video,
-    get_subtitle_by_track, get_subtitles_for_video,
+    get_attachment_by_filename, get_attachments_for_video, get_audio_tracks_for_video,
+    get_chapters_for_video, get_subtitle_by_track, get_subtitles_for_video,
 };
 use crate::handlers::common::{internal_err, verify_token};
-use crate::types::{AppState, AttachmentListResponse, ChapterListResponse, SubtitleListResponse};
+use crate::types::{
+    AppState, AttachmentListResponse, AudioTrackListResponse, ChapterListResponse,
+    SubtitleListResponse,
+};
 
 use axum::{
     Json,
@@ -82,6 +85,66 @@ pub async fn get_video_subtitles(
         .map_err(internal_err)?;
 
     Ok(Json(SubtitleListResponse { subtitles }))
+}
+
+pub async fn get_video_audio_tracks(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(video_id): Path<String>,
+    Query(query): Query<TokenQuery>,
+) -> Result<Json<AudioTrackListResponse>, (StatusCode, String)> {
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let mut token = query.token.as_deref().unwrap_or("");
+    if token.is_empty() {
+        for cookie in cookie_header.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("token=") {
+                token = val;
+                break;
+            }
+        }
+    }
+
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| addr.ip().to_string());
+
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !verify_token(
+        &video_id,
+        token,
+        &state.config.server.secret_key,
+        &ip,
+        user_agent,
+    ) {
+        error!(
+            video_id = %video_id,
+            ip = %ip,
+            "Audio tracks access denied: invalid or expired token"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: Invalid or expired token".to_string(),
+        ));
+    }
+
+    let items = get_audio_tracks_for_video(&state.db_pool, &video_id)
+        .await
+        .map_err(internal_err)?;
+
+    Ok(Json(AudioTrackListResponse { items }))
 }
 
 pub async fn get_subtitle_file(
@@ -320,20 +383,24 @@ pub async fn get_attachment_file(
         .await
         .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
 
+    // Get content length for JASSUB font loading (required for proper WebAssembly parsing)
+    let content_length = content.content_length().unwrap_or(0);
+
     let reader = content.body.into_async_read();
     let stream = tokio_util::io::ReaderStream::new(reader);
     let body_stream = stream.map(|result| result.map_err(std::io::Error::other));
     let body = Body::from_stream(body_stream);
 
-    Ok((
-        [
-            (header::CONTENT_TYPE, attachment.mimetype.as_str()),
-            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
-            (header::CACHE_CONTROL, "public, max-age=31536000"), // Cache fonts for 1 year
-        ],
-        body,
-    )
-        .into_response())
+    // Build response with Content-Length header for font files
+    let content_length_str = content_length.to_string();
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, attachment.mimetype.as_str())
+        .header(header::CONTENT_LENGTH, &content_length_str)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::CACHE_CONTROL, "public, max-age=31536000")
+        .body(body)
+        .unwrap())
 }
 
 pub async fn get_video_chapters(
@@ -406,6 +473,48 @@ pub async fn get_jassub_worker(
     let url = match filename.as_str() {
         "jassub-worker.js" => "https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.js",
         "jassub-worker.wasm" => "https://cdn.jsdelivr.net/npm/jassub/dist/jassub-worker.wasm",
+        _ => return Err((StatusCode::NOT_FOUND, "File not found".to_string())),
+    };
+
+    // Fetch from CDN
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+    let content_type = if filename.ends_with(".wasm") {
+        "application/wasm"
+    } else {
+        "application/javascript"
+    };
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| internal_err(anyhow::anyhow!(e)))?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=86400"), // Cache for 1 day
+        ],
+        bytes.to_vec(),
+    )
+        .into_response())
+}
+
+pub async fn get_libbitsub_worker(
+    Path(filename): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    // Only allow specific libbitsub files
+    let url = match filename.as_str() {
+        "libbitsub.js" => "https://cdn.jsdelivr.net/npm/libbitsub/pkg/libbitsub.js",
+        "libbitsub_bg.wasm" => "https://cdn.jsdelivr.net/npm/libbitsub/pkg/libbitsub_bg.wasm",
         _ => return Err((StatusCode::NOT_FOUND, "File not found".to_string())),
     };
 

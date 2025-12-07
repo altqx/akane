@@ -118,6 +118,10 @@ async fn main() -> Result<()> {
             get(handlers::get_attachment_file),
         )
         .route("/videos/{id}/chapters", get(handlers::get_video_chapters))
+        .route(
+            "/videos/{id}/audio-tracks",
+            get(handlers::get_video_audio_tracks),
+        )
         .route("/analytics/realtime", get(handlers::get_realtime_analytics))
         .route("/analytics/history", get(handlers::get_analytics_history))
         .route("/analytics/videos", get(handlers::get_analytics_videos))
@@ -146,6 +150,7 @@ async fn main() -> Result<()> {
         .route("/hls/{id}/{*file}", get(handlers::get_hls_file))
         .route("/player/{id}", get(handlers::get_player))
         .route("/jassub/{filename}", get(handlers::get_jassub_worker))
+        .route("/libbitsub/{filename}", get(handlers::get_libbitsub_worker))
         .nest_service(
             "/admin-webui",
             ServeDir::new("webui")
