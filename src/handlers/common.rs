@@ -1108,16 +1108,29 @@ fn rename_variables(code: &str) -> String {
             continue;
         }
 
-        // Handle identifiers
+        // Handle identifiers (skip property accesses like .foo or ?.foo)
         if is_ident_start(c) {
+            // Look back to the last non-whitespace char to avoid renaming properties
+            let mut k = ci;
+            while k > 0 && chars[k - 1].is_whitespace() {
+                k -= 1;
+            }
+            let follows_property = k > 0
+                && (chars[k - 1] == '.'
+                    || (chars[k - 1] == '?' && k > 1 && chars[k - 2] == '.'));
+
             let mut ident = String::new();
             while ci < len && is_ident_char(chars[ci]) {
                 ident.push(chars[ci]);
                 ci += 1;
             }
             // Check if this identifier should be renamed
-            if let Some(short) = local_vars.get(&ident) {
-                result.push_str(short);
+            if !follows_property {
+                if let Some(short) = local_vars.get(&ident) {
+                    result.push_str(short);
+                } else {
+                    result.push_str(&ident);
+                }
             } else {
                 result.push_str(&ident);
             }
