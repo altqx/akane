@@ -579,6 +579,56 @@ fn tokenize_js(code: &str) -> Vec<JsToken> {
     tokens
 }
 
+fn record_declared_name(
+    name: &str,
+    used_names: &mut HashSet<String>,
+    declared_set: &mut HashSet<String>,
+    declared_order: &mut Vec<String>,
+) {
+    used_names.insert(name.to_string());
+    if declared_set.insert(name.to_string()) {
+        declared_order.push(name.to_string());
+    }
+}
+
+fn collect_destructured_tokens(
+    tokens: &[JsToken],
+    start: usize,
+    used_names: &mut HashSet<String>,
+    declared_set: &mut HashSet<String>,
+    declared_order: &mut Vec<String>,
+) -> usize {
+    let mut depth = 0;
+    let mut idx = start;
+    while idx < tokens.len() {
+        match &tokens[idx] {
+            JsToken::Punctuation('{') | JsToken::Punctuation('[') => depth += 1,
+            JsToken::Punctuation('}') | JsToken::Punctuation(']') => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            JsToken::Identifier(name) if depth > 0 => {
+                let next_is_colon = match tokens.get(idx + 1) {
+                    Some(JsToken::Punctuation(':')) => true,
+                    Some(JsToken::Operator(op)) if op == ":" => true,
+                    _ => false,
+                };
+                if !next_is_colon {
+                    record_declared_name(name, used_names, declared_set, declared_order);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    idx
+}
+
 /// Rename local variables to shorter names
 fn rename_variables(code: &str) -> String {
     let tokens = tokenize_js(code);
@@ -798,47 +848,49 @@ fn rename_variables(code: &str) -> String {
     .into_iter()
     .collect();
 
-    // Track names that are already in use (including reserved and short existing vars)
     let mut used_names: HashSet<String> = reserved.iter().map(|s| s.to_string()).collect();
+    let mut declared_order: Vec<String> = Vec::new();
+    let mut declared_set: HashSet<String> = HashSet::new();
 
-    // Find all local variable declarations
-    let mut local_vars: HashMap<String, String> = HashMap::new();
-    let mut name_counter = 0;
+    for token in &tokens {
+        if let JsToken::Identifier(name) = token {
+            used_names.insert(name.clone());
+        }
+    }
 
-    // First pass: identify local variables (let, const, var declarations)
     let mut i = 0;
     while i < tokens.len() {
-        if let JsToken::Keyword(kw) = &tokens[i] {
-            if kw == "let" || kw == "const" || kw == "var" {
-                // Look for identifiers after the declaration keyword
+        match &tokens[i] {
+            JsToken::Keyword(kw) if kw == "let" || kw == "const" || kw == "var" => {
                 let mut j = i + 1;
                 while j < tokens.len() {
                     match &tokens[j] {
                         JsToken::Identifier(name) => {
-                            // Make sure existing identifiers stay reserved for collision checks
-                            used_names.insert(name.clone());
-                            // Only rename if not reserved and name is longer than what we'd replace it with
-                            if !reserved.contains(name.as_str())
-                                && !local_vars.contains_key(name)
-                                && name.len() > 1
-                            {
-                                // Generate a short name that doesn't conflict with reserved words
-                                loop {
-                                    let short_name = generate_short_name(name_counter);
-                                    name_counter += 1;
-                                    if !reserved.contains(short_name.as_str())
-                                        && !used_names.contains(&short_name)
-                                    {
-                                        used_names.insert(short_name.clone());
-                                        local_vars.insert(name.clone(), short_name);
-                                        break;
-                                    }
-                                }
+                            let is_property = match tokens.get(j + 1) {
+                                Some(JsToken::Punctuation(':')) => true,
+                                Some(JsToken::Operator(op)) if op == ":" => true,
+                                _ => false,
+                            };
+                            if !is_property {
+                                record_declared_name(
+                                    name,
+                                    &mut used_names,
+                                    &mut declared_set,
+                                    &mut declared_order,
+                                );
                             }
                         }
-                        JsToken::Punctuation(';') | JsToken::Punctuation('{') => break,
+                        JsToken::Punctuation('{') | JsToken::Punctuation('[') => {
+                            j = collect_destructured_tokens(
+                                &tokens,
+                                j,
+                                &mut used_names,
+                                &mut declared_set,
+                                &mut declared_order,
+                            );
+                        }
+                        JsToken::Punctuation(';') => break,
                         JsToken::Operator(op) if op == "=" => {
-                            // Skip to after the value
                             j += 1;
                             let mut depth = 0;
                             while j < tokens.len() {
@@ -864,11 +916,8 @@ fn rename_variables(code: &str) -> String {
                     j += 1;
                 }
             }
-            // Also capture function parameters
-            else if kw == "function" {
-                // Find the opening parenthesis
+            JsToken::Keyword(kw) if kw == "function" => {
                 let mut j = i + 1;
-                // Skip function name if present
                 if let Some(JsToken::Identifier(name)) = tokens.get(j) {
                     used_names.insert(name.clone());
                     j += 1;
@@ -877,24 +926,20 @@ fn rename_variables(code: &str) -> String {
                     j += 1;
                     while j < tokens.len() {
                         match &tokens[j] {
-                            JsToken::Identifier(name) => {
-                                used_names.insert(name.clone());
-                                if !reserved.contains(name.as_str())
-                                    && !local_vars.contains_key(name)
-                                    && name.len() > 1
-                                {
-                                    loop {
-                                        let short_name = generate_short_name(name_counter);
-                                        name_counter += 1;
-                                        if !reserved.contains(short_name.as_str())
-                                            && !used_names.contains(&short_name)
-                                        {
-                                            used_names.insert(short_name.clone());
-                                            local_vars.insert(name.clone(), short_name);
-                                            break;
-                                        }
-                                    }
-                                }
+                            JsToken::Identifier(name) => record_declared_name(
+                                name,
+                                &mut used_names,
+                                &mut declared_set,
+                                &mut declared_order,
+                            ),
+                            JsToken::Punctuation('{') | JsToken::Punctuation('[') => {
+                                j = collect_destructured_tokens(
+                                    &tokens,
+                                    j,
+                                    &mut used_names,
+                                    &mut declared_set,
+                                    &mut declared_order,
+                                );
                             }
                             JsToken::Punctuation(')') => break,
                             _ => {}
@@ -903,63 +948,75 @@ fn rename_variables(code: &str) -> String {
                     }
                 }
             }
-        }
-        // Arrow function parameters
-        else if let JsToken::Punctuation('(') = &tokens[i] {
-            // Check if this could be arrow function params
-            let mut j = i + 1;
-            let mut param_candidates: Vec<String> = Vec::new();
-            let mut valid = true;
-            let mut depth = 1;
+            JsToken::Punctuation('(') => {
+                let mut j = i + 1;
+                let mut param_candidates: Vec<String> = Vec::new();
+                let mut valid = true;
+                let mut depth = 1;
 
-            while j < tokens.len() && depth > 0 {
-                match &tokens[j] {
-                    JsToken::Punctuation('(') => depth += 1,
-                    JsToken::Punctuation(')') => depth -= 1,
-                    JsToken::Identifier(name) if depth == 1 => {
-                        param_candidates.push(name.clone());
+                while j < tokens.len() && depth > 0 {
+                    match &tokens[j] {
+                        JsToken::Punctuation('(') => depth += 1,
+                        JsToken::Punctuation(')') => depth -= 1,
+                        JsToken::Identifier(name) if depth == 1 => {
+                            param_candidates.push(name.clone());
+                        }
+                        JsToken::Punctuation('{') | JsToken::Punctuation('[') if depth == 1 => {
+                            j = collect_destructured_tokens(
+                                &tokens,
+                                j,
+                                &mut used_names,
+                                &mut declared_set,
+                                &mut declared_order,
+                            );
+                            continue;
+                        }
+                        JsToken::Punctuation(',') | JsToken::Operator(_) => {}
+                        _ if depth == 1 => valid = false,
+                        _ => {}
                     }
-                    JsToken::Punctuation(',') | JsToken::Operator(_) => {}
-                    _ if depth == 1 => {
-                        // Complex destructuring or other patterns - skip this
-                        valid = false;
-                    }
-                    _ => {}
+                    j += 1;
                 }
-                j += 1;
-            }
 
-            // Check if followed by =>
-            if valid && j < tokens.len() {
-                if let JsToken::Operator(op) = &tokens[j] {
-                    if op == "=>" {
-                        for name in param_candidates {
-                            used_names.insert(name.clone());
-                            if !reserved.contains(name.as_str())
-                                && !local_vars.contains_key(&name)
-                                && name.len() > 1
-                            {
-                                loop {
-                                    let short_name = generate_short_name(name_counter);
-                                    name_counter += 1;
-                                    if !reserved.contains(short_name.as_str())
-                                        && !used_names.contains(&short_name)
-                                    {
-                                        used_names.insert(short_name.clone());
-                                        local_vars.insert(name.clone(), short_name);
-                                        break;
-                                    }
-                                }
+                if valid && j < tokens.len() {
+                    if let JsToken::Operator(op) = &tokens[j] {
+                        if op == "=>" {
+                            for name in param_candidates {
+                                record_declared_name(
+                                    &name,
+                                    &mut used_names,
+                                    &mut declared_set,
+                                    &mut declared_order,
+                                );
                             }
                         }
                     }
                 }
             }
+            _ => {}
         }
         i += 1;
     }
 
-    // If no variables to rename, return original
+    let mut local_vars: HashMap<String, String> = HashMap::new();
+    let mut name_counter = 0;
+
+    for name in declared_order {
+        if reserved.contains(name.as_str()) || name.len() <= 1 {
+            continue;
+        }
+
+        loop {
+            let short_name = generate_short_name(name_counter);
+            name_counter += 1;
+            if !reserved.contains(short_name.as_str()) && !used_names.contains(&short_name) {
+                used_names.insert(short_name.clone());
+                local_vars.insert(name.clone(), short_name);
+                break;
+            }
+        }
+    }
+
     if local_vars.is_empty() {
         return code.to_string();
     }
@@ -1493,6 +1550,29 @@ mod tests {
             result.matches("let j=").count(),
             1,
             "Existing short name j should not be redeclared: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minify_avoids_collision_with_destructured_identifiers() {
+        let input = "const { s, deep: { t } } = opts; const extremelyLongVariableName = s + t;";
+
+        let result = minify_js(input);
+
+        assert!(
+            result.contains("const{ s") || result.contains("const{s"),
+            "Destructured identifier should remain intact: {}",
+            result
+        );
+        assert!(
+            result.contains("const a="),
+            "Long variable should still be renamed: {}",
+            result
+        );
+        assert!(
+            !result.contains("const s="),
+            "Generated short name must not collide with destructured binding: {}",
             result
         );
     }
