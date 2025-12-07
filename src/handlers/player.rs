@@ -682,7 +682,7 @@ pub async fn get_player(
         <video id="video" autoplay playsinline></video>
         <div id="loading">
             <div class="spinner"></div>
-            <div class="loading-text">Preparing your stream...</div>
+            <div class="loading-text">Loading...</div>
         </div>
         <div id="controls">
             <div id="progress">

@@ -798,6 +798,9 @@ fn rename_variables(code: &str) -> String {
     .into_iter()
     .collect();
 
+    // Track names that are already in use (including reserved and short existing vars)
+    let mut used_names: HashSet<String> = reserved.iter().map(|s| s.to_string()).collect();
+
     // Find all local variable declarations
     let mut local_vars: HashMap<String, String> = HashMap::new();
     let mut name_counter = 0;
@@ -812,6 +815,8 @@ fn rename_variables(code: &str) -> String {
                 while j < tokens.len() {
                     match &tokens[j] {
                         JsToken::Identifier(name) => {
+                            // Make sure existing identifiers stay reserved for collision checks
+                            used_names.insert(name.clone());
                             // Only rename if not reserved and name is longer than what we'd replace it with
                             if !reserved.contains(name.as_str())
                                 && !local_vars.contains_key(name)
@@ -821,7 +826,10 @@ fn rename_variables(code: &str) -> String {
                                 loop {
                                     let short_name = generate_short_name(name_counter);
                                     name_counter += 1;
-                                    if !reserved.contains(short_name.as_str()) {
+                                    if !reserved.contains(short_name.as_str())
+                                        && !used_names.contains(&short_name)
+                                    {
+                                        used_names.insert(short_name.clone());
                                         local_vars.insert(name.clone(), short_name);
                                         break;
                                     }
@@ -861,7 +869,8 @@ fn rename_variables(code: &str) -> String {
                 // Find the opening parenthesis
                 let mut j = i + 1;
                 // Skip function name if present
-                if let Some(JsToken::Identifier(_)) = tokens.get(j) {
+                if let Some(JsToken::Identifier(name)) = tokens.get(j) {
+                    used_names.insert(name.clone());
                     j += 1;
                 }
                 if let Some(JsToken::Punctuation('(')) = tokens.get(j) {
@@ -869,6 +878,7 @@ fn rename_variables(code: &str) -> String {
                     while j < tokens.len() {
                         match &tokens[j] {
                             JsToken::Identifier(name) => {
+                                used_names.insert(name.clone());
                                 if !reserved.contains(name.as_str())
                                     && !local_vars.contains_key(name)
                                     && name.len() > 1
@@ -876,7 +886,10 @@ fn rename_variables(code: &str) -> String {
                                     loop {
                                         let short_name = generate_short_name(name_counter);
                                         name_counter += 1;
-                                        if !reserved.contains(short_name.as_str()) {
+                                        if !reserved.contains(short_name.as_str())
+                                            && !used_names.contains(&short_name)
+                                        {
+                                            used_names.insert(short_name.clone());
                                             local_vars.insert(name.clone(), short_name);
                                             break;
                                         }
@@ -921,6 +934,7 @@ fn rename_variables(code: &str) -> String {
                 if let JsToken::Operator(op) = &tokens[j] {
                     if op == "=>" {
                         for name in param_candidates {
+                            used_names.insert(name.clone());
                             if !reserved.contains(name.as_str())
                                 && !local_vars.contains_key(&name)
                                 && name.len() > 1
@@ -928,7 +942,10 @@ fn rename_variables(code: &str) -> String {
                                 loop {
                                     let short_name = generate_short_name(name_counter);
                                     name_counter += 1;
-                                    if !reserved.contains(short_name.as_str()) {
+                                    if !reserved.contains(short_name.as_str())
+                                        && !used_names.contains(&short_name)
+                                    {
+                                        used_names.insert(short_name.clone());
                                         local_vars.insert(name.clone(), short_name);
                                         break;
                                     }
@@ -1442,6 +1459,40 @@ mod tests {
         assert!(
             result.contains("getElementById"),
             "getElementById should not be renamed: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minify_avoids_collision_with_existing_short_names() {
+        // Existing short identifiers should stay unique after renaming longer names
+        let input = r#"
+            let i = 0;
+            let j = 1;
+            let alpha = 2;
+            let beta = 3;
+            let gamma = 4;
+            let delta = 5;
+            let epsilon = 6;
+            let zeta = 7;
+            let eta = 8;
+            let theta = 9;
+            let iota = 10;
+        "#;
+
+        let result = minify_js(input);
+
+        assert_eq!(
+            result.matches("let i=").count(),
+            1,
+            "Existing short name i should not be redeclared: {}",
+            result
+        );
+
+        assert_eq!(
+            result.matches("let j=").count(),
+            1,
+            "Existing short name j should not be redeclared: {}",
             result
         );
     }
