@@ -361,6 +361,10 @@ fn tokenize_js(code: &str) -> Vec<JsToken> {
         "await",
         "static",
         "of",
+        "true",
+        "false",
+        "null",
+        "undefined",
     ]
     .into_iter()
     .collect();
