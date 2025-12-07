@@ -25,10 +25,9 @@ pub fn initialize_client(config: &ClickHouseConfig) -> Client {
         .with_user(&config.user)
         .with_password(&config.password)
         .with_database(&config.database)
-        // Set connection and query timeouts to prevent hanging on stale connections
-        .with_option("connect_timeout_ms", "5000")
-        .with_option("receive_timeout_ms", "10000")
-        .with_option("send_timeout_ms", "10000")
+        .with_option("connect_timeout", "5")
+        .with_option("receive_timeout", "10")
+        .with_option("send_timeout", "10")
 }
 
 pub async fn create_schema(client: &Client, config: &ClickHouseConfig) -> Result<()> {
