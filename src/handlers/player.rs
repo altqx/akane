@@ -295,8 +295,10 @@ pub async fn get_player(
                 durationEl.textContent = formatTime(video.duration);
             }};
             video.onprogress = () => {{
-                if (video.buffered.length > 0 && video.duration) {{
-                    const end = video.buffered.end(video.buffered.length - 1);
+                const ranges = video?.buffered;
+                const hasRanges = ranges && typeof ranges.length === 'number' && ranges.length > 0;
+                if (hasRanges && video.duration) {{
+                    const end = ranges.end(ranges.length - 1);
                     buffered.style.width = (end / video.duration) * 100 + '%';
                 }} else {{
                     buffered.style.width = '0%';
