@@ -50,6 +50,16 @@ async fn check_auth() -> Result<(), StatusCode> {
     Ok(())
 }
 
+async fn root_redirect(State(state): State<AppState>) -> Redirect {
+    state
+        .config
+        .server
+        .root_redirect_url
+        .as_deref()
+        .map(Redirect::permanent)
+        .unwrap_or_else(|| Redirect::permanent("https://altqx.com/"))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
@@ -157,10 +167,7 @@ async fn main() -> Result<()> {
                 .append_index_html_on_directories(false)
                 .fallback(ServeFile::new("webui/index.html")),
         )
-        .route(
-            "/",
-            get(|| async { Redirect::permanent("https://altqx.com/") }),
-        )
+        .route("/", get(root_redirect))
         // e.g. 1 GB body limit
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())

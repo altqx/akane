@@ -19,6 +19,8 @@ pub struct ServerConfig {
     pub admin_password: String,
     pub max_concurrent_encodes: usize,
     pub max_concurrent_uploads: usize,
+    #[serde(default)]
+    pub root_redirect_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
