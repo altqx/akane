@@ -834,6 +834,8 @@ fn rename_variables(code: &str) -> String {
         "hotkey",
         "url",
         "container",
+        "viewTracked",
+        "heartbeatStarted",
         "on",
         "off",
         "emit",
@@ -1450,15 +1452,15 @@ mod tests {
             }
         "#;
         let result = minify_js(input);
-        // viewTracked is renamed to 'a', booleans replaced with !0/!1
+        // viewTracked stays readable but booleans still compressed
         assert!(
-            result.contains("a=!1"),
-            "Expected renamed variable with false, got: {}",
+            result.contains("viewTracked=!1"),
+            "Expected viewTracked to start as false, got: {}",
             result
         );
         assert!(
-            result.contains("a=!0"),
-            "Expected renamed variable with true, got: {}",
+            result.contains("viewTracked=!0"),
+            "Expected viewTracked to flip to true, got: {}",
             result
         );
         assert!(!result.contains('\n'));
@@ -1605,4 +1607,5 @@ mod tests {
             result
         );
     }
+
 }
