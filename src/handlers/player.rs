@@ -197,6 +197,13 @@ pub async fn get_player(
                 }}
             }};
 
+            const clearPosterBackground = () => {{
+                if (!container) return;
+                container.style.backgroundImage = '';
+                container.classList.remove('has-thumb');
+                if (video) video.poster = '';
+            }};
+
             const updateSpriteInterval = () => {{
                 if (!video || !isFinite(video.duration) || video.duration <= 0) return;
                 const frames = spriteColumns * spriteRows;
@@ -382,8 +389,14 @@ pub async fn get_player(
             }};
             video.onpause = () => {{ playBtn.innerHTML = playIcon; }};
             video.onwaiting = () => setLoading(true);
-            video.onplaying = () => setLoading(false);
-            video.oncanplay = () => setLoading(false);
+            video.onplaying = () => {{
+                setLoading(false);
+                clearPosterBackground();
+            }};
+            video.oncanplay = () => {{
+                setLoading(false);
+                clearPosterBackground();
+            }};
 
             // Progress bar
             video.ontimeupdate = () => {{
