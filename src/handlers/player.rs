@@ -172,6 +172,46 @@ pub async fn get_player(
             const loading = document.getElementById('loading');
             const scrubHandle = document.getElementById('scrubHandle');
 
+            const setLoading = (isLoading) => {{
+                if (!loading) return;
+                if (isLoading) {{
+                    loading.classList.remove('hide');
+                }} else {{
+                    loading.classList.add('hide');
+                }}
+            }};
+
+            const updateBufferedBar = () => {{
+                if (!buffered || !video) return;
+                const duration = video.duration || 0;
+                if (!duration) {{
+                    buffered.style.width = '0%';
+                    return;
+                }}
+
+                let end = 0;
+
+                // Prefer Shaka's buffered info when available
+                if (player && typeof player.getBufferedInfo === 'function') {{
+                    const info = player.getBufferedInfo();
+                    const shakaRanges = info && info.total;
+                    if (shakaRanges && shakaRanges.length) {{
+                        end = shakaRanges[shakaRanges.length - 1].end;
+                    }}
+                }}
+
+                // Fallback to media element buffered ranges
+                if (!end) {{
+                    const ranges = video.buffered;
+                    if (ranges && typeof ranges.length === 'number' && ranges.length > 0) {{
+                        end = ranges.end(ranges.length - 1);
+                    }}
+                }}
+
+                const pct = Math.max(0, Math.min(1, end / duration)) * 100;
+                buffered.style.width = pct + '%';
+            }};
+
             // Initialize Shaka Player
             shaka.polyfill.installAll();
             if (!shaka.Player.isBrowserSupported()) {{
@@ -191,10 +231,17 @@ pub async fn get_player(
             // Load HLS stream
             try {{
                 await player.load('/hls/{video_id}/index.m3u8');
-                loading.classList.add('hide');
+                setLoading(false);
+                updateBufferedBar();
             }} catch (e) {{
                 console.error('Failed to load video:', e);
             }}
+
+            // Shaka buffering events keep spinner in sync with buffering state
+            player.addEventListener('buffering', (event) => {{
+                setLoading(!!event.buffering);
+                updateBufferedBar();
+            }});
 
             const updateOrientation = () => {{
                 if (!video.videoWidth || !video.videoHeight) return;
@@ -279,8 +326,12 @@ pub async fn get_player(
                     heartbeatStarted = true;
                     startHeartbeat();
                 }}
+                setLoading(false);
             }};
             video.onpause = () => {{ playBtn.innerHTML = playIcon; }};
+            video.onwaiting = () => setLoading(true);
+            video.onplaying = () => setLoading(false);
+            video.oncanplay = () => setLoading(false);
 
             // Progress bar
             video.ontimeupdate = () => {{
@@ -290,20 +341,13 @@ pub async fn get_player(
                     if (scrubHandle) scrubHandle.style.left = pct + '%';
                     currentTimeEl.textContent = formatTime(video.currentTime);
                 }}
+                updateBufferedBar();
             }};
             video.ondurationchange = () => {{
                 durationEl.textContent = formatTime(video.duration);
+                updateBufferedBar();
             }};
-            video.onprogress = () => {{
-                const ranges = video?.buffered;
-                const hasRanges = ranges && typeof ranges.length === 'number' && ranges.length > 0;
-                if (hasRanges && video.duration) {{
-                    const end = ranges.end(ranges.length - 1);
-                    buffered.style.width = (end / video.duration) * 100 + '%';
-                }} else {{
-                    buffered.style.width = '0%';
-                }}
-            }};
+            video.onprogress = updateBufferedBar;
             progress.onclick = (e) => {{
                 const rect = progress.getBoundingClientRect();
                 const pct = (e.clientX - rect.left) / rect.width;
@@ -632,7 +676,7 @@ pub async fn get_player(
         #video {{ width: 100%; height: 100%; object-fit: contain; max-width: 100%; max-height: 100%; }}
         #container[data-orientation="portrait"] #video {{ width: auto; height: 100%; max-width: 100%; }}
         #container[data-orientation="landscape"] #video {{ width: 100%; height: auto; max-height: 100%; }}
-        #loading {{ position: absolute; inset: 0; background: radial-gradient(circle at 20% 20%, rgba(229,9,20,0.18), transparent 40%), radial-gradient(circle at 80% 30%, rgba(255,255,255,0.08), transparent 45%), #000; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; color: #fff; font-size: 17px; letter-spacing: 0.3px; transition: opacity 0.25s ease, visibility 0.25s ease; z-index: 3; }}
+        #loading {{ position: absolute; inset: 0; background: transparent; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; color: #fff; font-size: 17px; letter-spacing: 0.3px; transition: opacity 0.25s ease, visibility 0.25s ease; z-index: 3; }}
         #loading.hide {{ opacity: 0; visibility: hidden; }}
         .spinner {{ width: 44px; height: 44px; border: 3px solid rgba(255,255,255,0.14); border-top-color: #e50914; border-radius: 50%; animation: spin 1s linear infinite; }}
         @keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
