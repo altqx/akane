@@ -61,7 +61,6 @@ pub async fn list_videos(
     .await
     .map_err(internal_err)?;
 
-    // Optimization: Fetch view counts for the returned videos only
     // Uses safe version - returns empty map if ClickHouse is unavailable
     let video_ids: Vec<String> = items.iter().map(|v| v.id.clone()).collect();
     let view_counts = clickhouse::get_view_counts_safe(&state.clickhouse, &video_ids).await;

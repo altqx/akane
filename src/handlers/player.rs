@@ -163,11 +163,14 @@ pub async fn get_player(
             const fullscreenBtn = document.getElementById('fullscreenBtn');
             const qualityBtn = document.getElementById('qualityBtn');
             const qualityMenu = document.getElementById('qualityMenu');
+            const audioBtn = document.getElementById('audioBtn');
+            const audioMenu = document.getElementById('audioMenu');
             const subtitleBtn = document.getElementById('subtitleBtn');
             const subtitleMenu = document.getElementById('subtitleMenu');
             const controls = document.getElementById('controls');
             const container = document.getElementById('container');
             const loading = document.getElementById('loading');
+            const scrubHandle = document.getElementById('scrubHandle');
 
             // Initialize Shaka Player
             shaka.polyfill.installAll();
@@ -188,10 +191,31 @@ pub async fn get_player(
             // Load HLS stream
             try {{
                 await player.load('/hls/{video_id}/index.m3u8');
-                loading.style.display = 'none';
+                loading.classList.add('hide');
             }} catch (e) {{
                 console.error('Failed to load video:', e);
             }}
+
+            const updateOrientation = () => {{
+                if (!video.videoWidth || !video.videoHeight) return;
+                const portrait = video.videoHeight > video.videoWidth;
+                if (portrait) {{
+                    container.dataset.orientation = 'portrait';
+                }} else {{
+                    container.dataset.orientation = 'landscape';
+                }}
+            }};
+
+            video.onloadedmetadata = updateOrientation;
+            window.addEventListener('resize', updateOrientation);
+            document.onfullscreenchange = () => {{
+                updateOrientation();
+                if (document.fullscreenElement) {{
+                    fullscreenBtn.innerHTML = exitFsIcon;
+                }} else {{
+                    fullscreenBtn.innerHTML = fsIcon;
+                }}
+            }};
 
             // Initialize subtitle if available
             if (subtitles.length > 0) {{
@@ -202,12 +226,42 @@ pub async fn get_player(
 
             // Build quality menu
             buildQualityMenu();
+            buildAudioMenu();
 
             // Play/Pause
             playBtn.onclick = togglePlay;
             video.onclick = togglePlay;
 
+            // Double-tap (mobile) seek +/-5s
+            let lastTapTime = 0;
+            let suppressClick = false;
+            video.addEventListener('touchend', (e) => {{
+                const now = Date.now();
+                const delta = now - lastTapTime;
+                lastTapTime = now;
+                if (delta > 350) return; // not a double tap
+
+                const touch = e.changedTouches[0];
+                const rect = video.getBoundingClientRect();
+                const mid = rect.left + rect.width / 2;
+                if (touch.clientX < mid) {{
+                    video.currentTime = Math.max(0, video.currentTime - 5);
+                }} else {{
+                    video.currentTime = Math.min(video.duration || video.currentTime + 5, video.currentTime + 5);
+                }}
+                suppressClick = true;
+                setTimeout(() => suppressClick = false, 300);
+                e.preventDefault();
+            }});
+
+            // Double-click (desktop) toggles fullscreen
+            video.ondblclick = (e) => {{
+                e.preventDefault();
+                fullscreenBtn.click();
+            }};
+
             function togglePlay() {{
+                if (suppressClick) return;
                 if (video.paused) {{
                     video.play();
                 }} else {{
@@ -233,6 +287,7 @@ pub async fn get_player(
                 if (video.duration) {{
                     const pct = (video.currentTime / video.duration) * 100;
                     progressBar.style.width = pct + '%';
+                    if (scrubHandle) scrubHandle.style.left = pct + '%';
                     currentTimeEl.textContent = formatTime(video.currentTime);
                 }}
             }};
@@ -243,6 +298,8 @@ pub async fn get_player(
                 if (video.buffered.length > 0 && video.duration) {{
                     const end = video.buffered.end(video.buffered.length - 1);
                     buffered.style.width = (end / video.duration) * 100 + '%';
+                }} else {{
+                    buffered.style.width = '0%';
                 }}
             }};
             progress.onclick = (e) => {{
@@ -277,28 +334,34 @@ pub async fn get_player(
                     container.requestFullscreen();
                 }}
             }};
-            document.onfullscreenchange = () => {{
-                if (document.fullscreenElement) {{
-                    fullscreenBtn.innerHTML = exitFsIcon;
-                }} else {{
-                    fullscreenBtn.innerHTML = fsIcon;
-                }}
-            }};
 
             // Menus
             qualityBtn.onclick = (e) => {{
                 e.stopPropagation();
-                subtitleMenu.classList.remove('show');
+                if (subtitleMenu) subtitleMenu.classList.remove('show');
+                if (audioMenu) audioMenu.classList.remove('show');
                 qualityMenu.classList.toggle('show');
             }};
-            subtitleBtn.onclick = (e) => {{
-                e.stopPropagation();
-                qualityMenu.classList.remove('show');
-                subtitleMenu.classList.toggle('show');
-            }};
+            if (audioBtn && audioMenu) {{
+                audioBtn.onclick = (e) => {{
+                    e.stopPropagation();
+                    qualityMenu.classList.remove('show');
+                    if (subtitleMenu) subtitleMenu.classList.remove('show');
+                    audioMenu.classList.toggle('show');
+                }};
+            }}
+            if (subtitleBtn && subtitleMenu) {{
+                subtitleBtn.onclick = (e) => {{
+                    e.stopPropagation();
+                    qualityMenu.classList.remove('show');
+                    if (audioMenu) audioMenu.classList.remove('show');
+                    subtitleMenu.classList.toggle('show');
+                }};
+            }}
             document.onclick = () => {{
                 qualityMenu.classList.remove('show');
-                subtitleMenu.classList.remove('show');
+                if (audioMenu) audioMenu.classList.remove('show');
+                if (subtitleMenu) subtitleMenu.classList.remove('show');
             }};
 
             // Keyboard shortcuts
@@ -380,6 +443,55 @@ pub async fn get_player(
                 }};
             }});
             menu.querySelector('.menu-item').classList.add('active');
+        }}
+
+        function buildAudioMenu() {{
+            const menu = document.getElementById('audioMenu');
+            const wrap = document.getElementById('audioWrap');
+            if (!menu || !wrap) return;
+
+            const tracks = player.getVariantTracks();
+            const audioMap = new Map();
+            tracks.forEach(t => {{
+                const key = `${{t.language || 'und'}}:${{t.audioChannelsCount || t.channelsCount || ''}}:${{t.roles?.[0] || ''}}`;
+                if (!audioMap.has(key)) {{
+                    audioMap.set(key, {{
+                        language: t.language || '',
+                        role: (t.roles && t.roles[0]) || '',
+                        label: t.label || t.language || 'Unknown',
+                        channels: t.audioChannelsCount || t.channelsCount || null
+                    }});
+                }}
+            }});
+
+            const audioTracks = Array.from(audioMap.values());
+            if (audioTracks.length <= 1) {{
+                wrap.style.display = 'none';
+                return;
+            }} else {{
+                wrap.style.display = '';
+            }}
+
+            menu.innerHTML = '';
+            audioTracks.forEach((track, idx) => {{
+                const channelLabel = track.channels ? ' (' + track.channels + 'ch)' : '';
+                menu.innerHTML += `<div class="menu-item" data-lang="${{track.language}}" data-role="${{track.role}}" data-idx="${{idx}}">${{track.label}}${{channelLabel}}</div>`;
+            }});
+
+            const items = menu.querySelectorAll('.menu-item');
+            items.forEach((item) => {{
+                item.onclick = (e) => {{
+                    e.stopPropagation();
+                    const lang = item.dataset.lang || '';
+                    const role = item.dataset.role || '';
+                    player.selectAudioLanguage(lang, role || undefined);
+                    items.forEach(i => i.classList.remove('active'));
+                    item.classList.add('active');
+                    menu.classList.remove('show');
+                }};
+            }});
+
+            items[0]?.classList.add('active');
         }}
 
         function buildSubtitleMenu() {{
@@ -493,6 +605,17 @@ pub async fn get_player(
 
     let scripts_html = scripts.join("\n    ");
 
+    let subtitle_controls = if has_subtitles {
+        r#"
+            <div class="menu-wrap">
+                <button id="subtitleBtn" class="ctrl-btn" aria-label="Subtitles"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V6h16v12zM6 10h2v2H6zm0 4h8v2H6zm10 0h2v2h-2zm-6-4h8v2h-8z"/></svg></button>
+                <div id="subtitleMenu" class="menu"></div>
+            </div>
+        "#.to_string()
+    } else {
+        String::new()
+    };
+
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -503,58 +626,70 @@ pub async fn get_player(
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{ background: #000; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }}
-        #container {{ position: relative; width: 100%; height: 100vh; background: #000; overflow: hidden; }}
-        #video {{ width: 100%; height: 100%; object-fit: contain; }}
-        #loading {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #fff; font-size: 18px; }}
+        #container {{ position: relative; width: 100%; height: 100vh; background: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; }}
+        #video {{ width: 100%; height: 100%; object-fit: contain; max-width: 100%; max-height: 100%; }}
+        #container[data-orientation="portrait"] #video {{ width: auto; height: 100%; max-width: 100%; }}
+        #container[data-orientation="landscape"] #video {{ width: 100%; height: auto; max-height: 100%; }}
+        #loading {{ position: absolute; inset: 0; background: radial-gradient(circle at 20% 20%, rgba(229,9,20,0.18), transparent 40%), radial-gradient(circle at 80% 30%, rgba(255,255,255,0.08), transparent 45%), #000; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; color: #fff; font-size: 17px; letter-spacing: 0.3px; transition: opacity 0.25s ease, visibility 0.25s ease; z-index: 3; }}
+        #loading.hide {{ opacity: 0; visibility: hidden; }}
+        .spinner {{ width: 44px; height: 44px; border: 3px solid rgba(255,255,255,0.14); border-top-color: #e50914; border-radius: 50%; animation: spin 1s linear infinite; }}
+        @keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
         
         /* Custom Controls */
         #controls {{
             position: absolute; bottom: 0; left: 0; right: 0;
-            background: linear-gradient(transparent, rgba(0,0,0,0.9));
-            padding: 60px 20px 15px; display: flex; flex-wrap: wrap;
+            background: linear-gradient(transparent, rgba(0,0,0,0.92));
+            padding: 62px 22px 16px; display: flex; flex-wrap: wrap;
             align-items: center; gap: 12px; opacity: 0; transition: opacity 0.3s;
         }}
         #controls.show {{ opacity: 1; }}
         
         /* Progress Bar */
-        #progress {{ flex: 100%; height: 5px; background: rgba(255,255,255,0.2); cursor: pointer; border-radius: 3px; position: relative; }}
-        #buffered {{ position: absolute; height: 100%; background: rgba(255,255,255,0.4); border-radius: 3px; }}
-        #progressBar {{ position: absolute; height: 100%; background: #e50914; border-radius: 3px; }}
-        #progress:hover {{ height: 7px; }}
+        #progress {{ flex: 100%; height: 6px; background: rgba(255,255,255,0.16); cursor: pointer; border-radius: 999px; position: relative; overflow: hidden; }}
+        #progressTrack {{ position: absolute; inset: 0; background: linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.16)); }}
+        #buffered {{ position: absolute; top: 0; left: 0; height: 100%; background: rgba(255,255,255,0.35); border-radius: 999px; }}
+        #progressBar {{ position: absolute; top: 0; left: 0; height: 100%; background: #e50914; border-radius: 999px; box-shadow: 0 0 12px rgba(229,9,20,0.45); }}
+        #scrubHandle {{ position: absolute; top: 50%; width: 14px; height: 14px; background: #e50914; border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 4px 14px rgba(229,9,20,0.45); }}
+        #progress:hover {{ height: 8px; }}
         
         /* Buttons */
-        .ctrl-btn {{ background: none; border: none; color: #fff; width: 36px; height: 36px; cursor: pointer; padding: 6px; display: flex; align-items: center; justify-content: center; }}
-        .ctrl-btn:hover {{ background: rgba(255,255,255,0.1); border-radius: 4px; }}
+        .ctrl-btn {{ background: none; border: none; color: #fff; width: 36px; height: 36px; cursor: pointer; padding: 6px; display: flex; align-items: center; justify-content: center; border-radius: 10px; transition: background 0.15s ease; }}
+        .ctrl-btn:hover {{ background: rgba(255,255,255,0.1); }}
         .ctrl-btn svg {{ width: 24px; height: 24px; }}
         
         /* Time Display */
-        #time {{ color: #fff; font-size: 13px; white-space: nowrap; }}
+        #time {{ color: #fff; font-size: 13px; white-space: nowrap; letter-spacing: 0.2px; }}
         
         /* Volume */
         #volumeWrap {{ display: flex; align-items: center; }}
         #volumeSlider {{ width: 0; opacity: 0; transition: all 0.2s; height: 4px; cursor: pointer; accent-color: #e50914; }}
-        #volumeWrap:hover #volumeSlider {{ width: 80px; opacity: 1; margin-left: 8px; }}
+        #volumeWrap:hover #volumeSlider {{ width: 90px; opacity: 1; margin-left: 10px; }}
         
         /* Spacer */
         .spacer {{ flex: 1; }}
         
         /* Menus */
         .menu-wrap {{ position: relative; }}
-        .menu {{ position: absolute; bottom: 100%; right: 0; background: rgba(28,28,28,0.95); border-radius: 6px; padding: 8px 0; min-width: 120px; display: none; }}
+        .menu {{ position: absolute; bottom: 100%; right: 0; background: rgba(24,24,24,0.96); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 8px 0; min-width: 140px; display: none; box-shadow: 0 12px 28px rgba(0,0,0,0.45); }}
         .menu.show {{ display: block; }}
-        .menu-item {{ padding: 10px 16px; color: #fff; font-size: 14px; cursor: pointer; }}
-        .menu-item:hover {{ background: rgba(255,255,255,0.1); }}
+        .menu-item {{ padding: 10px 16px; color: #fff; font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 8px; }}
+        .menu-item:hover {{ background: rgba(255,255,255,0.08); }}
         .menu-item.active {{ color: #e50914; }}
     </style>
 </head>
 <body>
     <div id="container">
         <video id="video" autoplay playsinline></video>
-        <div id="loading">Loading...</div>
+        <div id="loading">
+            <div class="spinner"></div>
+            <div class="loading-text">Preparing your stream...</div>
+        </div>
         <div id="controls">
             <div id="progress">
+                <div id="progressTrack"></div>
                 <div id="buffered"></div>
                 <div id="progressBar"></div>
+                <div id="scrubHandle"></div>
             </div>
             <button id="playBtn" class="ctrl-btn"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></button>
             <div id="volumeWrap">
@@ -564,13 +699,14 @@ pub async fn get_player(
             <div id="time"><span id="currentTime">0:00</span> / <span id="duration">0:00</span></div>
             <div class="spacer"></div>
             <div class="menu-wrap">
-                <button id="subtitleBtn" class="ctrl-btn"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V6h16v12zM6 10h2v2H6zm0 4h8v2H6zm10 0h2v2h-2zm-6-4h8v2h-8z"/></svg></button>
-                <div id="subtitleMenu" class="menu"></div>
-            </div>
-            <div class="menu-wrap">
-                <button id="qualityBtn" class="ctrl-btn"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M19 6h-2V4H7v2H5c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H5V8h14v10zm-6-1l4-4-4-4v3H9v2h4v3z"/></svg></button>
+                <button id="qualityBtn" class="ctrl-btn" aria-label="Quality"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.61-.22l-2.39.96a7.007 7.007 0 00-1.63-.94l-.36-2.54A.5.5 0 0013.88 2h-3.76a.5.5 0 00-.5.42l-.36 2.54c-.59.23-1.14.54-1.63.94l-2.39-.96a.5.5 0 00-.61.22L2.71 9.1a.5.5 0 00.12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 00-.12.64l1.92 3.32c.14.24.43.34.68.22l2.39-.96c.49.4 1.04.72 1.63.94l.36 2.54c.04.26.26.46.5.46h3.76c.25 0 .46-.2.5-.46l.36-2.54c.59-.23 1.14-.54 1.63-.94l2.39.96c.25.1.54.01.68-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1115.5 12 3.5 3.5 0 0112 15.5z"/></svg></button>
                 <div id="qualityMenu" class="menu"></div>
             </div>
+            <div class="menu-wrap" id="audioWrap">
+                <button id="audioBtn" class="ctrl-btn" aria-label="Audio Tracks"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 2a7 7 0 110 14 7 7 0 010-14zm-1 3v8.5a3.5 3.5 0 11-2-3.163V8h3z"/></svg></button>
+                <div id="audioMenu" class="menu"></div>
+            </div>
+            {subtitle_controls}
             <button id="fullscreenBtn" class="ctrl-btn"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg></button>
         </div>
     </div>
@@ -579,6 +715,7 @@ pub async fn get_player(
 </body>
 </html>"#,
         scripts_html = scripts_html,
+        subtitle_controls = subtitle_controls,
         minified_js = minified_js,
     );
 
