@@ -119,6 +119,13 @@ pub async fn get_player(
         {subtitle_js}
         {fonts_js}
         {chapters_js}
+        const thumbnailUrl = '/hls/{video_id}/thumbnail.jpg';
+        const spriteUrl = '/hls/{video_id}/sprites.jpg';
+        const spriteColumns = 10;
+        const spriteRows = 10;
+        const spriteWidth = 160;
+        const spriteHeight = 90;
+        let spriteInterval = 10;
         
         let player = null;
         let video = null;
@@ -171,6 +178,15 @@ pub async fn get_player(
             const container = document.getElementById('container');
             const loading = document.getElementById('loading');
             const scrubHandle = document.getElementById('scrubHandle');
+            const preview = document.getElementById('preview');
+            const previewImage = document.getElementById('previewImage');
+            const previewTime = document.getElementById('previewTime');
+
+            if (thumbnailUrl && video && container) {{
+                video.poster = thumbnailUrl;
+                container.style.backgroundImage = `url(${{thumbnailUrl}})`;
+                container.classList.add('has-thumb');
+            }}
 
             const setLoading = (isLoading) => {{
                 if (!loading) return;
@@ -179,6 +195,39 @@ pub async fn get_player(
                 }} else {{
                     loading.classList.add('hide');
                 }}
+            }};
+
+            const updateSpriteInterval = () => {{
+                if (!video || !isFinite(video.duration) || video.duration <= 0) return;
+                const frames = spriteColumns * spriteRows;
+                spriteInterval = Math.max(video.duration / frames, 0.1);
+            }};
+
+            const hidePreview = () => {{
+                if (preview) preview.classList.remove('show');
+            }};
+
+            const showPreview = (clientX) => {{
+                if (!spriteUrl || !preview || !previewImage || !previewTime || !progress || !video || !isFinite(video.duration)) return;
+                const rect = progress.getBoundingClientRect();
+                const pct = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+                const time = pct * (video.duration || 0);
+                const frames = spriteColumns * spriteRows;
+                const interval = spriteInterval > 0 ? spriteInterval : Math.max((video.duration || 0) / frames, 0.1);
+                const idx = Math.min(frames - 1, Math.floor(time / interval));
+                const col = idx % spriteColumns;
+                const row = Math.floor(idx / spriteColumns);
+
+                previewImage.style.backgroundImage = 'url(' + spriteUrl + ')';
+                previewImage.style.backgroundSize = (spriteColumns * spriteWidth) + 'px ' + (spriteRows * spriteHeight) + 'px';
+                previewImage.style.backgroundPosition = '-' + (col * spriteWidth) + 'px -' + (row * spriteHeight) + 'px';
+                previewTime.textContent = formatTime(time);
+
+                const minX = 60;
+                const maxX = rect.width - 60;
+                const x = Math.min(maxX, Math.max(minX, clientX - rect.left));
+                preview.style.left = x + 'px';
+                preview.classList.add('show');
             }};
 
             const updateBufferedBar = () => {{
@@ -253,7 +302,10 @@ pub async fn get_player(
                 }}
             }};
 
-            video.onloadedmetadata = updateOrientation;
+            video.onloadedmetadata = () => {{
+                updateOrientation();
+                updateSpriteInterval();
+            }};
             window.addEventListener('resize', updateOrientation);
             document.onfullscreenchange = () => {{
                 updateOrientation();
@@ -346,8 +398,15 @@ pub async fn get_player(
             video.ondurationchange = () => {{
                 durationEl.textContent = formatTime(video.duration);
                 updateBufferedBar();
+                updateSpriteInterval();
             }};
             video.onprogress = updateBufferedBar;
+            progress.onmousemove = (e) => showPreview(e.clientX);
+            progress.onmouseleave = hidePreview;
+            progress.ontouchmove = (e) => {{
+                if (e.touches && e.touches[0]) showPreview(e.touches[0].clientX);
+            }};
+            progress.ontouchend = hidePreview;
             progress.onclick = (e) => {{
                 const rect = progress.getBoundingClientRect();
                 const pct = (e.clientX - rect.left) / rect.width;
@@ -673,6 +732,7 @@ pub async fn get_player(
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{ background: #000; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }}
         #container {{ position: relative; width: 100%; height: 100vh; background: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; }}
+        #container.has-thumb {{ background-size: cover; background-position: center; background-repeat: no-repeat; }}
         #video {{ width: 100%; height: 100%; object-fit: contain; max-width: 100%; max-height: 100%; }}
         #container[data-orientation="portrait"] #video {{ width: auto; height: 100%; max-width: 100%; }}
         #container[data-orientation="landscape"] #video {{ width: 100%; height: auto; max-height: 100%; }}
@@ -691,12 +751,16 @@ pub async fn get_player(
         #controls.show {{ opacity: 1; }}
         
         /* Progress Bar */
-        #progress {{ flex: 100%; height: 6px; background: rgba(255,255,255,0.16); cursor: pointer; border-radius: 999px; position: relative; overflow: hidden; }}
+        #progress {{ flex: 100%; height: 6px; background: rgba(255,255,255,0.16); cursor: pointer; border-radius: 999px; position: relative; overflow: visible; }}
         #progressTrack {{ position: absolute; inset: 0; background: linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.16)); }}
         #buffered {{ position: absolute; top: 0; left: 0; height: 100%; background: rgba(255,255,255,0.35); border-radius: 999px; }}
         #progressBar {{ position: absolute; top: 0; left: 0; height: 100%; background: #e50914; border-radius: 999px; box-shadow: 0 0 12px rgba(229,9,20,0.45); }}
         #scrubHandle {{ position: absolute; top: 50%; width: 14px; height: 14px; background: #e50914; border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 4px 14px rgba(229,9,20,0.45); }}
         #progress:hover {{ height: 8px; }}
+        .preview {{ position: absolute; bottom: 110%; left: 0; transform: translateX(-50%); background: rgba(12,12,12,0.92); border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; box-shadow: 0 10px 24px rgba(0,0,0,0.55); display: none; overflow: hidden; pointer-events: none; z-index: 5; }}
+        .preview.show {{ display: block; }}
+        #previewImage {{ width: 160px; height: 90px; background-repeat: no-repeat; background-color: #0f0f0f; }}
+        #previewTime {{ padding: 6px 10px; color: #fff; text-align: center; font-size: 12px; letter-spacing: 0.3px; border-top: 1px solid rgba(255,255,255,0.08); background: rgba(0,0,0,0.65); }}
         
         /* Buttons */
         .ctrl-btn {{ background: none; border: none; color: #fff; width: 36px; height: 36px; cursor: pointer; padding: 6px; display: flex; align-items: center; justify-content: center; border-radius: 10px; transition: background 0.15s ease; }}
@@ -728,10 +792,13 @@ pub async fn get_player(
         <video id="video" autoplay playsinline></video>
         <div id="loading">
             <div class="spinner"></div>
-            <div class="loading-text">Loading...</div>
         </div>
         <div id="controls">
             <div id="progress">
+                <div id="preview" class="preview">
+                    <div id="previewImage"></div>
+                    <div id="previewTime"></div>
+                </div>
                 <div id="progressTrack"></div>
                 <div id="buffered"></div>
                 <div id="progressBar"></div>

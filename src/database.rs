@@ -35,6 +35,7 @@ pub async fn save_video(
     available_resolutions: &[String],
     duration: u32,
     thumbnail_key: &str,
+    sprites_key: &str,
     entrypoint: &str,
 ) -> Result<()> {
     let tags_json = serde_json::to_string(tags)?;
@@ -42,7 +43,7 @@ pub async fn save_video(
 
     sqlx
          ::query(
-             "INSERT INTO videos (id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint) VALUES (?, ?, ?, ?, ?, ?, ?)"
+             "INSERT INTO videos (id, name, tags, available_resolutions, duration, thumbnail_key, sprites_key, entrypoint) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
          )
          .bind(video_id)
          .bind(video_name)
@@ -50,6 +51,7 @@ pub async fn save_video(
          .bind(&resolutions_json)
          .bind(duration as i64)
          .bind(thumbnail_key)
+         .bind(sprites_key)
          .bind(entrypoint)
          .execute(db_pool).await?;
 
@@ -61,6 +63,7 @@ pub async fn save_video(
     Ok(())
 }
 
+#[allow(dead_code)]
 #[derive(sqlx::FromRow)]
 struct VideoRow {
     id: String,
@@ -69,6 +72,8 @@ struct VideoRow {
     available_resolutions: String,
     duration: i64,
     thumbnail_key: String,
+    sprites_key: Option<String>,
+    entrypoint: String,
     created_at: String,
 }
 
@@ -138,7 +143,7 @@ pub async fn list_videos(
     let rows: Vec<VideoRow> = match (name.as_ref(), tag) {
          (None, None) => {
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, entrypoint, created_at \
+                 "SELECT id, name, tags, available_resolutions, duration, thumbnail_key, sprites_key, entrypoint, created_at \
                   FROM videos \
                   ORDER BY datetime(created_at) DESC \
                   LIMIT ? OFFSET ?",
@@ -152,7 +157,7 @@ pub async fn list_videos(
              let safe_name = name.replace("\"", "");
              let pattern = format!("name:\"{}\"*", safe_name);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT v.id, v.name, v.tags, v.available_resolutions, v.duration, v.thumbnail_key, v.entrypoint, v.created_at \
+                 "SELECT v.id, v.name, v.tags, v.available_resolutions, v.duration, v.thumbnail_key, v.sprites_key, v.entrypoint, v.created_at \
                   FROM videos v \
                   JOIN videos_fts f ON v.id = f.id \
                   WHERE f.videos_fts MATCH ? \
@@ -169,7 +174,7 @@ pub async fn list_videos(
              let safe_tag = tag.replace("\"", "");
              let pattern = format!("tags:\"{}\"", safe_tag);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT v.id, v.name, v.tags, v.available_resolutions, v.duration, v.thumbnail_key, v.entrypoint, v.created_at \
+                 "SELECT v.id, v.name, v.tags, v.available_resolutions, v.duration, v.thumbnail_key, v.sprites_key, v.entrypoint, v.created_at \
                   FROM videos v \
                   JOIN videos_fts f ON v.id = f.id \
                   WHERE f.videos_fts MATCH ? \
@@ -187,7 +192,7 @@ pub async fn list_videos(
              let safe_tag = tag.replace("\"", "");
              let pattern = format!("name:\"{}\"* AND tags:\"{}\"", safe_name, safe_tag);
              sqlx::query_as::<_, VideoRow>(
-                 "SELECT v.id, v.name, v.tags, v.available_resolutions, v.duration, v.thumbnail_key, v.entrypoint, v.created_at \
+                 "SELECT v.id, v.name, v.tags, v.available_resolutions, v.duration, v.thumbnail_key, v.sprites_key, v.entrypoint, v.created_at \
                   FROM videos v \
                   JOIN videos_fts f ON v.id = f.id \
                   WHERE f.videos_fts MATCH ? \
@@ -211,6 +216,12 @@ pub async fn list_videos(
 
         let base = public_base_url.trim_end_matches('/');
         let thumbnail_url = format!("{}/{}", base, row.thumbnail_key);
+        let sprites_key = row
+            .sprites_key
+            .as_deref()
+            .map(|key| key.to_string())
+            .unwrap_or_else(|| row.thumbnail_key.clone());
+        let sprites_url = format!("{}/{}", base, sprites_key);
         // Return player URL instead of direct HLS URL
         let player_url = format!("/player/{}", row.id);
 
@@ -223,6 +234,7 @@ pub async fn list_videos(
             available_resolutions: resolutions,
             duration: row.duration as u32,
             thumbnail_url,
+            sprites_url: Some(sprites_url),
             player_url,
             view_count,
             created_at: row.created_at,

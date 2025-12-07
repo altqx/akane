@@ -142,6 +142,7 @@ pub struct VideoDto {
     pub available_resolutions: Vec<String>,
     pub duration: u32,
     pub thumbnail_url: String,
+    pub sprites_url: Option<String>,
     pub player_url: String,
     pub view_count: i64,
     pub created_at: String,
