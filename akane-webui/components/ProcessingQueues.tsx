@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, MouseEvent } from 'react'
 
 interface QueueItem {
   upload_id: string
@@ -38,6 +38,9 @@ export default function ProcessingQueues() {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set())
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
+  const [isCleaning, setIsCleaning] = useState(false)
+  const [cleanupMessage, setCleanupMessage] = useState<string | null>(null)
+  const [cleanupError, setCleanupError] = useState<string | null>(null)
 
   const fetchQueues = useCallback(async () => {
     try {
@@ -107,6 +110,36 @@ export default function ProcessingQueues() {
     }
   }
 
+  const handleCleanup = async (e: MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation()
+    setIsCleaning(true)
+    setCleanupMessage(null)
+    setCleanupError(null)
+
+    try {
+      const token = localStorage.getItem('admin_token')
+      const response = await fetch('/api/queues/cleanup', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      })
+
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(text || 'Failed to run cleanup')
+      }
+
+      const data = await response.json()
+      setCleanupMessage(data.message || 'Cleanup complete')
+      fetchQueues()
+    } catch (err) {
+      setCleanupError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setIsCleaning(false)
+    }
+  }
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'processing':
@@ -160,10 +193,6 @@ export default function ProcessingQueues() {
     )
   }
 
-  if (!queues || queues.items.length === 0) {
-    return null // Don't show anything if there are no queues
-  }
-
   return (
     <div className='card bg-base-100 shadow-xl mb-6'>
       <div className='card-body p-4'>
@@ -194,6 +223,18 @@ export default function ProcessingQueues() {
               {queues.completed_count > 0 && <span className='text-success'>• {queues.completed_count} completed</span>}
               {queues.failed_count > 0 && <span className='text-error'>• {queues.failed_count} failed</span>}
             </div>
+            <button
+              className='btn btn-outline btn-xs'
+              onClick={handleCleanup}
+              disabled={isCleaning}
+              title='Clean up stale uploads'
+            >
+              {isCleaning ? (
+                <span className='loading loading-spinner loading-xs'></span>
+              ) : (
+                'Cleanup'
+              )}
+            </button>
             <span className='text-[11px] text-base-content/60'>Updated {formatSince(lastUpdatedAt)}</span>
             <svg
               xmlns='http://www.w3.org/2000/svg'
@@ -214,6 +255,14 @@ export default function ProcessingQueues() {
 
         {!isCollapsed && (
           <div className='mt-4 space-y-3'>
+            {(cleanupMessage || cleanupError) && (
+              <div className={`alert ${cleanupError ? 'alert-error' : 'alert-success'} py-2 px-3`}>
+                <span className='text-sm'>{cleanupError || cleanupMessage}</span>
+              </div>
+            )}
+            {(!queues || queues.items.length === 0) && (
+              <div className='text-sm text-base-content/60'>No processing activity right now.</div>
+            )}
             {/* Active Items */}
             {activeItems.length > 0 && (
               <div>

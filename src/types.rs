@@ -185,6 +185,7 @@ pub struct ChunkedUpload {
     pub total_chunks: u32,
     pub received_chunks: Vec<bool>,
     pub temp_dir: std::path::PathBuf,
+    pub last_activity: u64,
 }
 
 pub type ChunkedUploadsMap = Arc<RwLock<HashMap<String, ChunkedUpload>>>;

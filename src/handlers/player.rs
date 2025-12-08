@@ -4,12 +4,17 @@ use crate::types::AppState;
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
 use futures::StreamExt;
 use std::net::SocketAddr;
+
+#[derive(serde::Deserialize)]
+pub struct HlsTokenQuery {
+    pub token: Option<String>,
+}
 
 pub async fn get_player(
     State(state): State<AppState>,
@@ -116,6 +121,7 @@ pub async fn get_player(
     let js_code = format!(
         r#"
         const videoId = '{video_id}';
+        const token = '{token}';
         {subtitle_js}
         {fonts_js}
         {chapters_js}
@@ -135,6 +141,17 @@ pub async fn get_player(
         let heartbeatStarted = false;
         let currentSubtitle = null;
         let subtitlesEnabled = true;
+
+        const withToken = (uri) => {{
+            if (!token) return uri;
+            try {{
+                const url = new URL(uri, window.location.origin);
+                url.searchParams.set('token', token);
+                return url.toString();
+            }} catch (e) {{
+                return uri;
+            }}
+        }};
 
         // Subtitle type detection
         function needsJassub(codec) {{
@@ -284,9 +301,17 @@ pub async fn get_player(
                 }}
             }});
 
+            const networking = player.getNetworkingEngine();
+            if (networking) {{
+                networking.registerRequestFilter((_type, request) => {{
+                    if (!request.uris || !request.uris.length) return;
+                    request.uris = request.uris.map(withToken);
+                }});
+            }}
+
             // Load HLS stream
             try {{
-                await player.load('/hls/{video_id}/index.m3u8');
+                await player.load(withToken('/hls/{video_id}/index.m3u8'));
                 setLoading(false);
                 updateBufferedBar();
             }} catch (e) {{
@@ -871,24 +896,27 @@ pub async fn get_hls_file(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Query(query): Query<HlsTokenQuery>,
     Path((id, file)): Path<(String, String)>,
 ) -> Result<Response, (StatusCode, String)> {
     let key = format!("{}/{}", id, file);
 
     // Verify token for HLS files (.m3u8, .ts)
     if file.ends_with(".m3u8") || file.ends_with(".ts") {
-        // Extract token from Cookie header
-        let cookie_header = headers
-            .get(header::COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        // Extract token from query or Cookie header
+        let mut token = query.token.unwrap_or_default();
+        if token.is_empty() {
+            let cookie_header = headers
+                .get(header::COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
 
-        let mut token = "";
-        for cookie in cookie_header.split(';') {
-            let cookie = cookie.trim();
-            if let Some(val) = cookie.strip_prefix("token=") {
-                token = val;
-                break;
+            for cookie in cookie_header.split(';') {
+                let cookie = cookie.trim();
+                if let Some(val) = cookie.strip_prefix("token=") {
+                    token = val.to_string();
+                    break;
+                }
             }
         }
 
@@ -906,7 +934,7 @@ pub async fn get_hls_file(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        if !verify_token(&id, token, &state.config.server.secret_key, &ip, user_agent) {
+        if !verify_token(&id, &token, &state.config.server.secret_key, &ip, user_agent) {
             return Err((
                 StatusCode::FORBIDDEN,
                 "Access denied: Invalid or expired token".to_string(),

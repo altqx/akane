@@ -1,6 +1,6 @@
 {
   "name": "akane-webui",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "scripts": {
     "dev": "bun --bun next dev --turbo -p 3001",

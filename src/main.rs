@@ -146,6 +146,7 @@ async fn main() -> Result<()> {
         .route("/videos/{id}", put(handlers::update_video))
         .route("/queues", get(handlers::list_queues))
         .route("/queues/{id}", delete(handlers::cancel_queue))
+        .route("/queues/cleanup", post(handlers::cleanup_uploads))
         .route("/auth/check", get(check_auth))
         //.route("/purge", delete(handlers::purge_bucket))
         .layer(middleware::from_fn_with_state(

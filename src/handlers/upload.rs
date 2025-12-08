@@ -22,8 +22,38 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::{fs, io::AsyncReadExt, io::AsyncWriteExt};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
+
+// Stale upload timeout: 30 minutes of inactivity
+const STALE_UPLOAD_TIMEOUT_MS: u64 = 30 * 60 * 1000;
+
+/// Clean up stale chunked uploads that have been inactive for too long
+async fn cleanup_stale_uploads(state: &AppState) {
+    let now = now_millis();
+    let mut to_remove = Vec::new();
+
+    {
+        let uploads = state.chunked_uploads.read().await;
+        for (id, upload) in uploads.iter() {
+            if now.saturating_sub(upload.last_activity) > STALE_UPLOAD_TIMEOUT_MS {
+                to_remove.push((id.clone(), upload.temp_dir.clone()));
+            }
+        }
+    }
+
+    if !to_remove.is_empty() {
+        let mut uploads = state.chunked_uploads.write().await;
+        let mut progress_map = state.progress.write().await;
+
+        for (id, temp_dir) in to_remove {
+            uploads.remove(&id);
+            progress_map.remove(&id);
+            let _ = fs::remove_dir_all(&temp_dir).await;
+            warn!("Cleaned up stale chunked upload: {}", id);
+        }
+    }
+}
 
 async fn update_progress(progress_map: &ProgressMap, upload_id: &str, mut update: ProgressUpdate) {
     let mut map = progress_map.write().await;
@@ -529,6 +559,7 @@ pub async fn upload_chunk(
                     total_chunks,
                     received_chunks: vec![false; total_chunks as usize],
                     temp_dir: temp_dir.clone(),
+                    last_activity: now_millis(),
                 },
             );
 
@@ -563,7 +594,16 @@ pub async fn upload_chunk(
         let mut uploads = state.chunked_uploads.write().await;
         if let Some(upload) = uploads.get_mut(&upload_id) {
             upload.received_chunks[chunk_index as usize] = true;
+            upload.last_activity = now_millis();
         }
+    }
+
+    // Periodically cleanup stale uploads (every ~10 chunks received)
+    if chunk_index % 10 == 0 {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            cleanup_stale_uploads(&state_clone).await;
+        });
     }
 
     let received_count = {
@@ -1123,4 +1163,94 @@ pub async fn get_progress(
     };
 
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+#[derive(serde::Serialize)]
+pub struct CleanupResponse {
+    pub cleaned_uploads: usize,
+    pub cleaned_progress: usize,
+    pub message: String,
+}
+
+/// Clean up all stale/stuck uploads - useful when uploads get into a bad state
+pub async fn cleanup_uploads(
+    State(state): State<AppState>,
+) -> Result<Json<CleanupResponse>, (StatusCode, String)> {
+    info!("Manual cleanup of stale uploads requested");
+
+    let now = now_millis();
+    let mut cleaned_uploads = 0;
+    let mut cleaned_progress = 0;
+
+    // Clean up chunked uploads that are older than timeout or not in progress map
+    {
+        let progress_map = state.progress.read().await;
+        let mut uploads = state.chunked_uploads.write().await;
+
+        let mut to_remove = Vec::new();
+        for (id, upload) in uploads.iter() {
+            // Remove if stale OR if there's no corresponding progress entry
+            let is_stale = now.saturating_sub(upload.last_activity) > STALE_UPLOAD_TIMEOUT_MS;
+            let no_progress = !progress_map.contains_key(id);
+
+            if is_stale || no_progress {
+                to_remove.push((id.clone(), upload.temp_dir.clone()));
+            }
+        }
+
+        for (id, temp_dir) in to_remove {
+            uploads.remove(&id);
+            let _ = fs::remove_dir_all(&temp_dir).await;
+            cleaned_uploads += 1;
+            info!("Cleaned up stale chunked upload: {}", id);
+        }
+    }
+
+    // Clean up progress entries that are stuck (not completed/failed and older than 1 hour)
+    {
+        let mut progress_map = state.progress.write().await;
+        let hour_ago = now.saturating_sub(60 * 60 * 1000);
+
+        let mut to_remove = Vec::new();
+        for (id, progress) in progress_map.iter() {
+            if progress.status != "completed"
+                && progress.status != "failed"
+                && progress.created_at < hour_ago
+            {
+                to_remove.push(id.clone());
+            }
+        }
+
+        for id in to_remove {
+            progress_map.remove(&id);
+            cleaned_progress += 1;
+            info!("Cleaned up stuck progress entry: {}", id);
+        }
+    }
+
+    // Also clean up temp directories on disk that don't have corresponding entries
+    if let Ok(mut entries) = tokio::fs::read_dir(std::env::temp_dir()).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("chunked-") {
+                    let upload_id = name.trim_start_matches("chunked-");
+                    let uploads = state.chunked_uploads.read().await;
+                    if !uploads.contains_key(upload_id) {
+                        let _ = fs::remove_dir_all(entry.path()).await;
+                        cleaned_uploads += 1;
+                        info!("Cleaned up orphaned temp directory: {}", name);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Json(CleanupResponse {
+        cleaned_uploads,
+        cleaned_progress,
+        message: format!(
+            "Cleanup complete: {} uploads, {} progress entries removed",
+            cleaned_uploads, cleaned_progress
+        ),
+    }))
 }
