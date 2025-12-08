@@ -41,6 +41,7 @@ const UploadContext = createContext<UploadContextType | undefined>(undefined)
 // Constants
 // Keep per-request payloads small to avoid proxy/client timeouts on slow links
 const CHUNK_SIZE = 10 * 1024 * 1024 // 10MB chunks (still under Cloudflare's 100MB limit)
+const MAX_CONCURRENT_CHUNKS = 4 // Upload up to 4 chunks in parallel for faster uploads
 
 // Fallback UUID generator for browsers that don't support crypto.randomUUID
 function generateUUID(): string {
@@ -215,25 +216,79 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       signal?: AbortSignal
     ): Promise<void> => {
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
-      let completedChunksBytes = 0
+      
+      // Track progress for each chunk independently
+      const chunkProgress = new Map<number, number>() // chunkIndex -> bytes uploaded for that chunk
+      const completedChunks = new Set<number>()
+      
+      const updateTotalProgress = () => {
+        let totalBytesUploaded = 0
+        for (const [, bytes] of chunkProgress) {
+          totalBytesUploaded += bytes
+        }
+        // Add completed chunks that might have been removed from chunkProgress
+        for (const chunkIndex of completedChunks) {
+          if (!chunkProgress.has(chunkIndex)) {
+            const start = chunkIndex * CHUNK_SIZE
+            const end = Math.min(start + CHUNK_SIZE, file.size)
+            totalBytesUploaded += (end - start)
+          }
+        }
+        const progressPercent = Math.round((totalBytesUploaded / file.size) * 90) // 0-90% for chunks
+        onProgress(progressPercent, totalBytesUploaded)
+      }
 
-      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+      // Create array of chunk indices to upload
+      const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i)
+      
+      // Upload chunks in parallel with concurrency limit
+      const uploadChunkWithTracking = async (chunkIndex: number): Promise<void> => {
         if (signal?.aborted) throw new Error('Upload cancelled')
 
         const start = chunkIndex * CHUNK_SIZE
         const end = Math.min(start + CHUNK_SIZE, file.size)
         const chunk = file.slice(start, end)
 
-        // Track progress within each chunk
         const onChunkProgress = (chunkBytesUploaded: number) => {
-          const totalBytesUploaded = completedChunksBytes + chunkBytesUploaded
-          const progressPercent = Math.round((totalBytesUploaded / file.size) * 90) // 0-90% for chunks
-          onProgress(progressPercent, totalBytesUploaded)
+          chunkProgress.set(chunkIndex, chunkBytesUploaded)
+          updateTotalProgress()
         }
 
         await uploadChunk(chunk, uploadId, chunkIndex, totalChunks, file.name, token, onChunkProgress, signal)
-        completedChunksBytes = end
+        completedChunks.add(chunkIndex)
+        chunkProgress.delete(chunkIndex) // Clean up, completedChunks tracks this now
+        updateTotalProgress()
       }
+
+      // Process chunks with concurrency limit
+      const processChunksWithConcurrency = async () => {
+        const executing = new Set<Promise<void>>()
+        
+        for (const chunkIndex of chunkIndices) {
+          if (signal?.aborted) throw new Error('Upload cancelled')
+          
+          const promise = uploadChunkWithTracking(chunkIndex).then(() => {
+            executing.delete(promise)
+          }).catch((err) => {
+            executing.delete(promise)
+            throw err
+          })
+          
+          executing.add(promise)
+          
+          // When we hit the concurrency limit, wait for one to complete
+          if (executing.size >= MAX_CONCURRENT_CHUNKS) {
+            await Promise.race(executing)
+          }
+        }
+        
+        // Wait for remaining chunks to complete
+        if (executing.size > 0) {
+          await Promise.all(executing)
+        }
+      }
+
+      await processChunksWithConcurrency()
 
       // Finalize
       onProgress(95, file.size)
