@@ -21,12 +21,23 @@ interface QueueListResponse {
   failed_count: number
 }
 
+function formatSince(timestampMs: number | null | undefined) {
+  if (!timestampMs) return '—'
+  const deltaSec = Math.max(0, Math.floor((Date.now() - timestampMs) / 1000))
+  if (deltaSec < 60) return `${deltaSec}s ago`
+  if (deltaSec < 3600) return `${Math.floor(deltaSec / 60)}m ago`
+  const hours = Math.floor(deltaSec / 3600)
+  const minutes = Math.floor((deltaSec % 3600) / 60)
+  return `${hours}h ${minutes}m ago`
+}
+
 export default function ProcessingQueues() {
   const [queues, setQueues] = useState<QueueListResponse | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set())
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
 
   const fetchQueues = useCallback(async () => {
     try {
@@ -43,6 +54,7 @@ export default function ProcessingQueues() {
 
       const data: QueueListResponse = await response.json()
       setQueues(data)
+      setLastUpdatedAt(Date.now())
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
@@ -182,6 +194,7 @@ export default function ProcessingQueues() {
               {queues.completed_count > 0 && <span className='text-success'>• {queues.completed_count} completed</span>}
               {queues.failed_count > 0 && <span className='text-error'>• {queues.failed_count} failed</span>}
             </div>
+            <span className='text-[11px] text-base-content/60'>Updated {formatSince(lastUpdatedAt)}</span>
             <svg
               xmlns='http://www.w3.org/2000/svg'
               width='16'
@@ -220,6 +233,7 @@ export default function ProcessingQueues() {
                             >
                               {item.video_name || `${item.upload_id.substring(0, 8)}...`}
                             </span>
+                            <span className='text-[11px] text-base-content/60'>Started {formatSince(item.created_at)}</span>
                             {item.video_name && (
                               <span className='text-xs text-base-content/50'>
                                 ID: {item.upload_id.substring(0, 8)}...
@@ -229,7 +243,14 @@ export default function ProcessingQueues() {
                           {getStatusBadge(item.status)}
                         </div>
                         <div className='flex items-center gap-2'>
-                          <span className='text-sm font-bold'>{item.percentage}%</span>
+                          <div className='text-right'>
+                            <div className='text-sm font-bold'>{item.percentage}%</div>
+                            {item.total_chunks > 0 && (
+                              <div className='text-[11px] text-base-content/60'>
+                                {item.current_chunk}/{item.total_chunks} chunks
+                              </div>
+                            )}
+                          </div>
                           {isCancellable(item) && (
                             <button
                               className='btn btn-ghost btn-xs text-error'
@@ -266,11 +287,15 @@ export default function ProcessingQueues() {
                         max='100'
                       ></progress>
                       <div className='flex justify-between mt-1 text-xs text-base-content/70'>
-                        <span>{item.stage}</span>
-                        <span>
-                          {item.current_chunk > 0 ? `${item.current_chunk}/${item.total_chunks}` : ''}
-                          {item.details && ` • ${item.details}`}
-                        </span>
+                        <div className='flex flex-wrap items-center gap-2'>
+                          <span className='badge badge-ghost badge-xs'>{item.stage}</span>
+                          {item.details && (
+                            <span className='truncate max-w-[200px]' title={item.details}>
+                              {item.details}
+                            </span>
+                          )}
+                        </div>
+                        <span className='text-[11px] text-base-content/60'>ID {item.upload_id.substring(0, 8)}...</span>
                       </div>
                     </div>
                   ))}
@@ -308,6 +333,7 @@ export default function ProcessingQueues() {
                         <span className='text-sm truncate max-w-[250px]' title={item.video_name || item.upload_id}>
                           {item.video_name || `${item.upload_id.substring(0, 8)}...`}
                         </span>
+                        <span className='text-[11px] text-base-content/60'>Queued {formatSince(item.created_at)}</span>
                       </div>
                       {getStatusBadge(item.status)}
                     </div>
@@ -348,6 +374,7 @@ export default function ProcessingQueues() {
                         <span className='text-sm truncate max-w-[250px]' title={item.video_name || item.upload_id}>
                           {item.video_name || `${item.upload_id.substring(0, 8)}...`}
                         </span>
+                        <span className='text-[11px] text-base-content/60'>Started {formatSince(item.created_at)}</span>
                       </div>
                       <div className='flex items-center gap-2'>
                         {item.details && (
