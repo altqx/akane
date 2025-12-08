@@ -158,6 +158,9 @@ export default function ProcessingQueues() {
   const activeItems = queues?.items.filter((i) => i.status === 'processing' || i.status === 'initializing') || []
   const completedItems = queues?.items.filter((i) => i.status === 'completed') || []
   const failedItems = queues?.items.filter((i) => i.status === 'failed') || []
+  const activeCount = queues?.active_count ?? 0
+  const completedCount = queues?.completed_count ?? 0
+  const failedCount = queues?.failed_count ?? 0
 
   if (isLoading) {
     return (
@@ -219,9 +222,9 @@ export default function ProcessingQueues() {
           </h3>
           <div className='flex items-center gap-2'>
             <div className='flex gap-1 text-xs'>
-              {queues.active_count > 0 && <span className='text-primary'>{queues.active_count} processing</span>}
-              {queues.completed_count > 0 && <span className='text-success'>• {queues.completed_count} completed</span>}
-              {queues.failed_count > 0 && <span className='text-error'>• {queues.failed_count} failed</span>}
+              {activeCount > 0 && <span className='text-primary'>{activeCount} processing</span>}
+              {completedCount > 0 && <span className='text-success'>• {completedCount} completed</span>}
+              {failedCount > 0 && <span className='text-error'>• {failedCount} failed</span>}
             </div>
             <button
               className='btn btn-outline btn-xs'
