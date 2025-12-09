@@ -38,10 +38,10 @@ interface UploadContextType {
 
 const UploadContext = createContext<UploadContextType | undefined>(undefined)
 
-// Constants
-// Keep per-request payloads small to avoid proxy/client timeouts on slow links
-const CHUNK_SIZE = 10 * 1024 * 1024 // 10MB chunks (still under Cloudflare's 100MB limit)
-const MAX_CONCURRENT_CHUNKS = 4 // Upload up to 4 chunks in parallel for faster uploads
+const CHUNK_SIZE = 5 * 1024 * 1024
+const MAX_CONCURRENT_CHUNKS = 2
+const MAX_RETRIES = 3
+const RETRY_BASE_DELAY = 1000
 
 // Fallback UUID generator for browsers that don't support crypto.randomUUID
 function generateUUID(): string {
@@ -109,8 +109,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     setUploadItems((prev) => prev.filter((item) => item.id !== id))
   }, [])
 
-  // Upload a single chunk with progress tracking
-  const uploadChunk = useCallback(
+  // Upload a single chunk with retry logic for reliability through proxies
+  const uploadChunkWithRetry = useCallback(
     async (
       chunk: Blob,
       uploadId: string,
@@ -121,53 +121,89 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       onChunkProgress: (bytesUploaded: number) => void,
       signal?: AbortSignal
     ): Promise<void> => {
-      return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        const formData = new FormData()
-        formData.append('chunk', chunk)
-        formData.append('chunk_index', chunkIndex.toString())
-        formData.append('total_chunks', totalChunks.toString())
-        formData.append('file_name', fileName)
+      let lastError: Error | null = null
 
-        xhr.upload.addEventListener('progress', (event) => {
-          if (event.lengthComputable) {
-            onChunkProgress(event.loaded)
-          }
-        })
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        if (signal?.aborted) throw new Error('Upload cancelled')
 
-        xhr.addEventListener('load', () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve()
-          } else {
-            let errorMsg = 'Chunk upload failed'
-            try {
-              const response = JSON.parse(xhr.responseText)
-              errorMsg = response.error || response.message || errorMsg
-            } catch {
-              errorMsg = xhr.responseText || errorMsg
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const xhr = new XMLHttpRequest()
+            const formData = new FormData()
+            formData.append('chunk', chunk)
+            formData.append('chunk_index', chunkIndex.toString())
+            formData.append('total_chunks', totalChunks.toString())
+            formData.append('file_name', fileName)
+
+            xhr.upload.addEventListener('progress', (event) => {
+              if (event.lengthComputable) {
+                onChunkProgress(event.loaded)
+              }
+            })
+
+            xhr.addEventListener('load', () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                resolve()
+              } else {
+                let errorMsg = 'Chunk upload failed'
+                try {
+                  const response = JSON.parse(xhr.responseText)
+                  errorMsg = response.error || response.message || errorMsg
+                } catch {
+                  errorMsg = xhr.responseText || errorMsg
+                }
+                reject(new Error(errorMsg))
+              }
+            })
+
+            xhr.addEventListener('error', () => reject(new Error('Network error during chunk upload')))
+            xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
+            xhr.addEventListener('timeout', () => reject(new Error('Chunk upload timed out')))
+
+            // Shorter timeout for faster failure detection and retry through Cloudflare Tunnels
+            xhr.timeout = 60_000 // 60 seconds - fail faster & retry sooner
+
+            if (signal) {
+              signal.addEventListener('abort', () => xhr.abort())
             }
-            reject(new Error(errorMsg))
+
+            const apiBase = getApiBaseUrl()
+            xhr.open('POST', `${apiBase}/api/upload/chunk`)
+            xhr.setRequestHeader('X-Upload-ID', uploadId)
+            if (token) {
+              xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+            }
+            xhr.send(formData)
+          })
+
+          // Success - exit retry loop
+          return
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err))
+
+          // Don't retry if explicitly cancelled
+          if (lastError.message === 'Upload cancelled') {
+            throw lastError
           }
-        })
 
-        xhr.addEventListener('error', () => reject(new Error('Network error during chunk upload')))
-        xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
-        xhr.addEventListener('timeout', () => reject(new Error('Chunk upload timed out')))
-
-        xhr.timeout = 120_000 // fail fast if a proxy stalls the upload
-
-        if (signal) {
-          signal.addEventListener('abort', () => xhr.abort())
+          // Wait before retrying with exponential backoff
+          if (attempt < MAX_RETRIES) {
+            const delay = RETRY_BASE_DELAY * Math.pow(2, attempt) // 1s, 2s, 4s
+            console.warn(
+              `Chunk ${chunkIndex + 1}/${totalChunks} failed (attempt ${attempt + 1}/${
+                MAX_RETRIES + 1
+              }), retrying in ${delay}ms...`,
+              lastError.message
+            )
+            await new Promise((resolve) => setTimeout(resolve, delay))
+            // Reset progress for retry
+            onChunkProgress(0)
+          }
         }
+      }
 
-        const apiBase = getApiBaseUrl()
-        xhr.open('POST', `${apiBase}/api/upload/chunk`)
-        xhr.setRequestHeader('X-Upload-ID', uploadId)
-        if (token) {
-          xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-        }
-        xhr.send(formData)
-      })
+      // All retries exhausted
+      throw lastError || new Error('Chunk upload failed after retries')
     },
     []
   )
@@ -216,11 +252,11 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       signal?: AbortSignal
     ): Promise<void> => {
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
-      
+
       // Track progress for each chunk independently
       const chunkProgress = new Map<number, number>() // chunkIndex -> bytes uploaded for that chunk
       const completedChunks = new Set<number>()
-      
+
       const updateTotalProgress = () => {
         let totalBytesUploaded = 0
         for (const [, bytes] of chunkProgress) {
@@ -231,7 +267,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           if (!chunkProgress.has(chunkIndex)) {
             const start = chunkIndex * CHUNK_SIZE
             const end = Math.min(start + CHUNK_SIZE, file.size)
-            totalBytesUploaded += (end - start)
+            totalBytesUploaded += end - start
           }
         }
         const progressPercent = Math.round((totalBytesUploaded / file.size) * 90) // 0-90% for chunks
@@ -240,7 +276,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
       // Create array of chunk indices to upload
       const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i)
-      
+
       // Upload chunks in parallel with concurrency limit
       const uploadChunkWithTracking = async (chunkIndex: number): Promise<void> => {
         if (signal?.aborted) throw new Error('Upload cancelled')
@@ -254,7 +290,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           updateTotalProgress()
         }
 
-        await uploadChunk(chunk, uploadId, chunkIndex, totalChunks, file.name, token, onChunkProgress, signal)
+        await uploadChunkWithRetry(chunk, uploadId, chunkIndex, totalChunks, file.name, token, onChunkProgress, signal)
         completedChunks.add(chunkIndex)
         chunkProgress.delete(chunkIndex) // Clean up, completedChunks tracks this now
         updateTotalProgress()
@@ -263,25 +299,27 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       // Process chunks with concurrency limit
       const processChunksWithConcurrency = async () => {
         const executing = new Set<Promise<void>>()
-        
+
         for (const chunkIndex of chunkIndices) {
           if (signal?.aborted) throw new Error('Upload cancelled')
-          
-          const promise = uploadChunkWithTracking(chunkIndex).then(() => {
-            executing.delete(promise)
-          }).catch((err) => {
-            executing.delete(promise)
-            throw err
-          })
-          
+
+          const promise = uploadChunkWithTracking(chunkIndex)
+            .then(() => {
+              executing.delete(promise)
+            })
+            .catch((err) => {
+              executing.delete(promise)
+              throw err
+            })
+
           executing.add(promise)
-          
+
           // When we hit the concurrency limit, wait for one to complete
           if (executing.size >= MAX_CONCURRENT_CHUNKS) {
             await Promise.race(executing)
           }
         }
-        
+
         // Wait for remaining chunks to complete
         if (executing.size > 0) {
           await Promise.all(executing)
@@ -295,7 +333,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       await finalizeUpload(uploadId, videoName, fileTags, token, signal)
       onProgress(100, file.size)
     },
-    [uploadChunk, finalizeUpload]
+    [uploadChunkWithRetry, finalizeUpload]
   )
 
   // Upload file in a single request (for small files <= 50MB)
@@ -349,7 +387,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           signal.addEventListener('abort', () => xhr.abort())
         }
 
-        xhr.timeout = 120_000 // fail fast if a proxy stalls the upload
+        // Shorter timeout for faster failure detection through Cloudflare Tunnels
+        xhr.timeout = 60_000 // 60 seconds - matches chunked upload timeout
 
         const apiBase = getApiBaseUrl()
         xhr.open('POST', `${apiBase}/api/upload`)
