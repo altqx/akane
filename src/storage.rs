@@ -7,14 +7,19 @@ use futures::stream::{self, StreamExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 use tokio::fs::{self, File};
 use tokio::io::AsyncReadExt;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 // 100 MB threshold for multipart upload
 const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024;
 // 100 MB part size for multipart upload (minimum is 5MB for S3)
 const MULTIPART_PART_SIZE: usize = 100 * 1024 * 1024;
+// Retry configuration for R2 uploads
+const MAX_UPLOAD_RETRIES: u32 = 3;
+const INITIAL_RETRY_DELAY_MS: u64 = 1000;
+const MAX_RETRY_DELAY_MS: u64 = 10000;
 
 /// Upload a large file to R2/S3 using multipart upload to avoid Windows I/O buffer limits.
 /// This streams the file in chunks instead of loading the entire file into memory.
@@ -262,15 +267,54 @@ pub async fn upload_hls_to_r2(
                     .await
                     .with_context(|| format!("read {:?}", path))?;
 
-                state
-                    .s3
-                    .put_object()
-                    .bucket(&state.config.r2.bucket)
-                    .key(&key)
-                    .body(body_bytes.into())
-                    .send()
-                    .await
-                    .with_context(|| format!("upload {}", key))?;
+                // Retry logic with exponential backoff for connection errors
+                let mut last_error = None;
+                for attempt in 0..MAX_UPLOAD_RETRIES {
+                    match state
+                        .s3
+                        .put_object()
+                        .bucket(&state.config.r2.bucket)
+                        .key(&key)
+                        .body(body_bytes.clone().into())
+                        .send()
+                        .await
+                    {
+                        Ok(_) => {
+                            if attempt > 0 {
+                                info!("Uploaded {} after {} retries", key, attempt);
+                            }
+                            last_error = None;
+                            break;
+                        }
+                        Err(e) => {
+                            last_error = Some(e);
+                            if attempt < MAX_UPLOAD_RETRIES - 1 {
+                                let delay = std::cmp::min(
+                                    INITIAL_RETRY_DELAY_MS * 2u64.pow(attempt),
+                                    MAX_RETRY_DELAY_MS,
+                                );
+                                warn!(
+                                    "Upload failed for {}, attempt {}/{}, retrying in {}ms: {:?}",
+                                    key,
+                                    attempt + 1,
+                                    MAX_UPLOAD_RETRIES,
+                                    delay,
+                                    last_error
+                                );
+                                tokio::time::sleep(Duration::from_millis(delay)).await;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(e) = last_error {
+                    return Err(anyhow::anyhow!(
+                        "upload {}: {} (after {} retries)",
+                        key,
+                        e,
+                        MAX_UPLOAD_RETRIES
+                    ));
+                }
 
                 info!("Uploaded: {}", key);
 

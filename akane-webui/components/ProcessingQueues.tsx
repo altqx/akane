@@ -37,6 +37,8 @@ export default function ProcessingQueues() {
   const [error, setError] = useState<string | null>(null)
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set())
+  const [removingIds, setRemovingIds] = useState<Set<string>>(new Set())
+  const [isClearingFailed, setIsClearingFailed] = useState(false)
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
   const [isCleaning, setIsCleaning] = useState(false)
   const [cleanupMessage, setCleanupMessage] = useState<string | null>(null)
@@ -107,6 +109,62 @@ export default function ProcessingQueues() {
         next.delete(uploadId)
         return next
       })
+    }
+  }
+
+  const handleRemove = async (uploadId: string) => {
+    setRemovingIds((prev) => new Set(prev).add(uploadId))
+
+    try {
+      const token = localStorage.getItem('admin_token')
+      const response = await fetch(`/api/queues/${uploadId}/remove`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      })
+
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(text || 'Failed to remove')
+      }
+
+      // Refresh queues
+      fetchQueues()
+    } catch (err) {
+      console.error('Failed to remove queue item:', err)
+    } finally {
+      setRemovingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(uploadId)
+        return next
+      })
+    }
+  }
+
+  const handleClearAllFailed = async (e: MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation()
+    setIsClearingFailed(true)
+
+    try {
+      const token = localStorage.getItem('admin_token')
+      const response = await fetch('/api/queues/failed', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      })
+
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(text || 'Failed to clear failed items')
+      }
+
+      fetchQueues()
+    } catch (err) {
+      console.error('Failed to clear failed items:', err)
+    } finally {
+      setIsClearingFailed(false)
     }
   }
 
@@ -397,8 +455,39 @@ export default function ProcessingQueues() {
             {/* Failed Items */}
             {failedItems.length > 0 && (
               <div>
-                <div className='text-xs font-semibold text-base-content/70 uppercase tracking-wider mb-2'>
-                  Failed ({failedItems.length})
+                <div className='flex items-center justify-between mb-2'>
+                  <div className='text-xs font-semibold text-base-content/70 uppercase tracking-wider'>
+                    Failed ({failedItems.length})
+                  </div>
+                  <button
+                    className='btn btn-ghost btn-xs text-error hover:bg-error/20'
+                    onClick={handleClearAllFailed}
+                    disabled={isClearingFailed}
+                    title='Clear all failed items'
+                  >
+                    {isClearingFailed ? (
+                      <span className='loading loading-spinner loading-xs'></span>
+                    ) : (
+                      <>
+                        <svg
+                          xmlns='http://www.w3.org/2000/svg'
+                          width='12'
+                          height='12'
+                          viewBox='0 0 24 24'
+                          fill='none'
+                          stroke='currentColor'
+                          strokeWidth='2'
+                          strokeLinecap='round'
+                          strokeLinejoin='round'
+                        >
+                          <path d='M3 6h18' />
+                          <path d='M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6' />
+                          <path d='M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2' />
+                        </svg>
+                        Clear All
+                      </>
+                    )}
+                  </button>
                 </div>
                 <div className='space-y-1'>
                   {failedItems.slice(0, 5).map((item) => (
@@ -435,6 +524,32 @@ export default function ProcessingQueues() {
                           </span>
                         )}
                         {getStatusBadge(item.status)}
+                        <button
+                          className='btn btn-ghost btn-xs text-error hover:bg-error/20'
+                          onClick={() => handleRemove(item.upload_id)}
+                          disabled={removingIds.has(item.upload_id)}
+                          title='Remove failed item'
+                        >
+                          {removingIds.has(item.upload_id) ? (
+                            <span className='loading loading-spinner loading-xs'></span>
+                          ) : (
+                            <svg
+                              xmlns='http://www.w3.org/2000/svg'
+                              width='14'
+                              height='14'
+                              viewBox='0 0 24 24'
+                              fill='none'
+                              stroke='currentColor'
+                              strokeWidth='2'
+                              strokeLinecap='round'
+                              strokeLinejoin='round'
+                            >
+                              <path d='M3 6h18' />
+                              <path d='M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6' />
+                              <path d='M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2' />
+                            </svg>
+                          )}
+                        </button>
                       </div>
                     </div>
                   ))}

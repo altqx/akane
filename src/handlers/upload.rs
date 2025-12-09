@@ -1035,6 +1035,76 @@ pub struct CancelQueueResponse {
     pub message: String,
 }
 
+#[derive(serde::Serialize)]
+pub struct RemoveQueueResponse {
+    pub removed: bool,
+    pub message: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct ClearFailedResponse {
+    pub removed_count: usize,
+    pub message: String,
+}
+
+/// Remove all failed queue items from the progress map
+pub async fn clear_all_failed(
+    State(state): State<AppState>,
+) -> Result<Json<ClearFailedResponse>, (StatusCode, String)> {
+    info!("Clearing all failed queue items");
+
+    let mut progress_map = state.progress.write().await;
+
+    let failed_ids: Vec<String> = progress_map
+        .iter()
+        .filter(|(_, p)| p.status == "failed")
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    let removed_count = failed_ids.len();
+
+    for id in failed_ids {
+        progress_map.remove(&id);
+    }
+
+    Ok(Json(ClearFailedResponse {
+        removed_count,
+        message: format!("Removed {} failed queue item(s)", removed_count),
+    }))
+}
+
+/// Remove a failed queue item from the progress map
+pub async fn remove_failed_queue(
+    State(state): State<AppState>,
+    Path(upload_id): Path<String>,
+) -> Result<Json<RemoveQueueResponse>, (StatusCode, String)> {
+    info!("Attempting to remove failed queue: {}", upload_id);
+
+    let mut progress_map = state.progress.write().await;
+
+    if let Some(progress) = progress_map.get(&upload_id) {
+        // Only allow removal of failed items
+        if progress.status != "failed" {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "Cannot remove: only failed items can be removed (current status: {})",
+                    progress.status
+                ),
+            ));
+        }
+
+        progress_map.remove(&upload_id);
+
+        Ok(Json(RemoveQueueResponse {
+            removed: true,
+            message: "Failed queue item removed successfully".to_string(),
+        }))
+    } else {
+        Err((StatusCode::NOT_FOUND, "Queue item not found".to_string()))
+    }
+}
+
 pub async fn cancel_queue(
     State(state): State<AppState>,
     Path(upload_id): Path<String>,

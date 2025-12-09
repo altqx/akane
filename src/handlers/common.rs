@@ -1116,8 +1116,7 @@ fn rename_variables(code: &str) -> String {
                 k -= 1;
             }
             let follows_property = k > 0
-                && (chars[k - 1] == '.'
-                    || (chars[k - 1] == '?' && k > 1 && chars[k - 2] == '.'));
+                && (chars[k - 1] == '.' || (chars[k - 1] == '?' && k > 1 && chars[k - 2] == '.'));
 
             let mut ident = String::new();
             while ci < len && is_ident_char(chars[ci]) {
@@ -1624,5 +1623,4 @@ mod tests {
             result
         );
     }
-
 }

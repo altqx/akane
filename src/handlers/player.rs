@@ -934,7 +934,13 @@ pub async fn get_hls_file(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        if !verify_token(&id, &token, &state.config.server.secret_key, &ip, user_agent) {
+        if !verify_token(
+            &id,
+            &token,
+            &state.config.server.secret_key,
+            &ip,
+            user_agent,
+        ) {
             return Err((
                 StatusCode::FORBIDDEN,
                 "Access denied: Invalid or expired token".to_string(),

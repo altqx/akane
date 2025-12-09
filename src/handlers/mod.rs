@@ -20,7 +20,8 @@ pub use player::{get_hls_file, get_player};
 
 #[allow(unused)]
 pub use upload::{
-    CancelQueueResponse, CleanupResponse, cancel_queue, finalize_chunked_upload, get_progress, list_queues,
-    upload_chunk, upload_video, cleanup_uploads,
+    CancelQueueResponse, CleanupResponse, ClearFailedResponse, RemoveQueueResponse, cancel_queue,
+    cleanup_uploads, clear_all_failed, finalize_chunked_upload, get_progress, list_queues,
+    remove_failed_queue, upload_chunk, upload_video,
 };
 pub use video::{delete_videos, list_videos, update_video};
