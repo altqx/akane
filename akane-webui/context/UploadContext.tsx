@@ -38,8 +38,8 @@ interface UploadContextType {
 
 const UploadContext = createContext<UploadContextType | undefined>(undefined)
 
-const CHUNK_SIZE = 5 * 1024 * 1024
-const MAX_CONCURRENT_CHUNKS = 2
+const CHUNK_SIZE = 50 * 1024 * 1024
+const MAX_CONCURRENT_CHUNKS = 1
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY = 1000
 
