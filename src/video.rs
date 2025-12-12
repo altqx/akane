@@ -3,10 +3,9 @@ use crate::types::{
     VideoVariant,
 };
 use anyhow::{Context, Result};
-use futures::future::try_join_all;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::io::AsyncReadExt;
+use tokio::time::{Duration, sleep};
 use tokio::{fs, process::Command};
 use tracing::{error, info, warn};
 
@@ -612,7 +611,6 @@ pub async fn encode_to_hls(
     out_dir: &PathBuf,
     progress: &ProgressMap,
     upload_id: &str,
-    semaphore: Arc<Semaphore>,
     encoder: &str,
     duration: u32,
     audio_streams: &[AudioStreamInfo],
@@ -632,374 +630,230 @@ pub async fn encode_to_hls(
     // GOP size - use 48 for 24fps content (2 seconds), adjust for HLS segment alignment
     let gop = 48;
 
-    let input = Arc::new(input.clone());
-    let out_dir = Arc::new(out_dir.clone());
-    let progress = Arc::new(progress.clone());
+    let input = input.clone();
+    let out_dir = out_dir.clone();
     let upload_id = upload_id.to_string();
-    let audio_streams = Arc::new(audio_streams.to_vec());
+    let audio_streams = audio_streams.to_vec();
 
-    let mut encode_tasks = Vec::new();
-    // Total tasks = video variants + audio streams
-    let total_variants = variants.len() as u32 + audio_streams.len() as u32;
+    // Total tasks = video variants + audio streams + thumbnail + sprites
+    let total_steps = variants.len() as u32 + audio_streams.len() as u32 + 2;
 
-    for (index, variant) in variants.clone().iter().enumerate() {
-        let input = Arc::clone(&input);
-        let out_dir = Arc::clone(&out_dir);
-        let semaphore = Arc::clone(&semaphore);
-        let progress = Arc::clone(&progress);
-        let upload_id = upload_id.clone();
-        let variant = variant.clone();
-        let encoder_type = encoder_type.clone();
+    // Timeout heuristic: long enough for slow encodes, but not infinite.
+    //  - minimum 30 minutes
+    //  - ~20x realtime based on duration
+    //  - cap at 6 hours per ffmpeg invocation
+    let ffmpeg_timeout = Duration::from_secs((duration as u64).saturating_mul(20).max(30 * 60))
+        .min(Duration::from_secs(6 * 60 * 60));
 
-        let task = tokio::task::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
+    // Helper that runs ffmpeg and kills it on timeout.
+    async fn run_ffmpeg_with_timeout(
+        mut cmd: Command,
+        timeout_duration: Duration,
+        context_label: &str,
+    ) -> Result<std::process::Output> {
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
 
-            let seg_dir = out_dir.join(&variant.label);
-            fs::create_dir_all(&seg_dir).await?;
-            let playlist_path = seg_dir.join("index.m3u8");
-            let segment_pattern = seg_dir.join("segment_%03d.ts");
+        let mut child = cmd.spawn().context("failed to spawn ffmpeg")?;
 
-            info!(
-                "Encoding variant: {} at {}p with bitrate {}kbps (max: {}kbps)",
-                variant.label,
-                variant.height,
-                variant.bitrate,
-                variant.max_bitrate()
-            );
+        // Capture stderr without moving `child` (wait_with_output consumes Child).
+        let mut stderr_handle = child.stderr.take();
+        let mut stderr = Vec::new();
 
-            // Update progress before starting this variant
-            let current_chunk = (index + 1) as u32;
-            let percentage = (((current_chunk as f32) / (total_variants as f32)) * 100.0) as u32;
-            let (existing_video_name, existing_created_at) = {
-                let progress_map = progress.read().await;
-                progress_map
-                    .get(&upload_id)
-                    .map(|p| (p.video_name.clone(), p.created_at))
-                    .unwrap_or((None, 0))
-            };
-            let start_progress = ProgressUpdate {
-                stage: "FFmpeg processing".to_string(),
-                current_chunk,
-                total_chunks: total_variants,
-                percentage,
-                details: Some(format!(
-                    "Encoding variant: {} ({}p)",
-                    variant.label, variant.height
-                )),
-                status: "processing".to_string(),
-                result: None,
-                error: None,
-                video_name: existing_video_name.clone(),
-                created_at: existing_created_at,
-            };
-            progress
-                .write()
-                .await
-                .insert(upload_id.clone(), start_progress);
-
-            // Try encoding with configured encoder, fallback to CPU if hardware fails
-            let mut current_encoder = encoder_type.clone();
-            let mut last_error: Option<String> = None;
-
-            loop {
-                // Clean up any partial output from previous attempt
-                if last_error.is_some() {
-                    let _ = fs::remove_dir_all(&seg_dir).await;
-                    fs::create_dir_all(&seg_dir).await?;
+        tokio::select! {
+            status = child.wait() => {
+                let status = status.context("failed to wait for ffmpeg")?;
+                if let Some(ref mut err) = stderr_handle {
+                    let _ = err.read_to_end(&mut stderr).await;
                 }
-
-                let mut cmd = Command::new("ffmpeg");
-                cmd.stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::piped())
-                    .arg("-loglevel")
-                    .arg("error")
-                    .arg("-y");
-
-                // Hardware acceleration setup
-                match current_encoder {
-                    EncoderType::Nvenc => {
-                        cmd.arg("-hwaccel")
-                            .arg("cuda")
-                            .arg("-hwaccel_output_format")
-                            .arg("cuda");
-                    }
-                    EncoderType::Vaapi => {
-                        cmd.arg("-hwaccel")
-                            .arg("vaapi")
-                            .arg("-hwaccel_output_format")
-                            .arg("vaapi")
-                            .arg("-vaapi_device")
-                            .arg("/dev/dri/renderD128");
-                    }
-                    EncoderType::Qsv => {
-                        cmd.arg("-hwaccel")
-                            .arg("qsv")
-                            .arg("-hwaccel_output_format")
-                            .arg("qsv");
-                    }
-                    EncoderType::Cpu => {}
-                }
-
-                cmd.arg("-i").arg(input.as_ref());
-
-                // Scaling filter
-                let scale_filter = match current_encoder {
-                    EncoderType::Nvenc => format!("scale_cuda=-2:{}", variant.height),
-                    EncoderType::Vaapi => format!("scale_vaapi=-2:{}", variant.height),
-                    EncoderType::Qsv => format!("vpp_qsv=w=-2:h={}", variant.height),
-                    EncoderType::Cpu => format!("scale=-2:{}", variant.height),
-                };
-
-                cmd.arg("-c:v").arg(current_encoder.video_codec());
-
-                // Encoder specific settings
-                match current_encoder {
-                    EncoderType::Nvenc => {
-                        cmd.arg("-preset")
-                            .arg("p3")
-                            .arg("-profile:v")
-                            .arg("main")
-                            .arg("-level:v")
-                            .arg("4.1")
-                            .arg("-rc:v")
-                            .arg("vbr")
-                            .arg("-rc-lookahead")
-                            .arg("20")
-                            .arg("-bf")
-                            .arg("3")
-                            .arg("-spatial-aq")
-                            .arg("1")
-                            .arg("-temporal-aq")
-                            .arg("1")
-                            .arg("-aq-strength")
-                            .arg("8");
-                    }
-                    EncoderType::Vaapi => {
-                        cmd.arg("-compression_level")
-                            .arg("20")
-                            .arg("-rc_mode")
-                            .arg("VBR")
-                            .arg("-profile:v")
-                            .arg("main");
-                    }
-                    EncoderType::Qsv => {
-                        cmd.arg("-preset")
-                            .arg("faster")
-                            .arg("-profile:v")
-                            .arg("main")
-                            .arg("-look_ahead")
-                            .arg("1")
-                            .arg("-look_ahead_depth")
-                            .arg("40");
-                    }
-                    EncoderType::Cpu => {
-                        cmd.arg("-preset")
-                            .arg("veryfast")
-                            .arg("-profile:v")
-                            .arg("main")
-                            .arg("-level:v")
-                            .arg("4.0");
-                    }
-                }
-
-                cmd.arg("-b:v")
-                    .arg(variant.bitrate_str())
-                    .arg("-maxrate")
-                    .arg(format!("{}k", variant.max_bitrate()))
-                    .arg("-bufsize")
-                    .arg(format!("{}k", variant.bufsize()))
-                    .arg("-vf")
-                    .arg(&scale_filter);
-
-                if matches!(current_encoder, EncoderType::Cpu) {
-                    cmd.arg("-pix_fmt").arg("yuv420p");
-                }
-
-                cmd.arg("-g")
-                    .arg(gop.to_string())
-                    .arg("-keyint_min")
-                    .arg(gop.to_string())
-                    .arg("-sc_threshold")
-                    .arg("0")
-                    .arg("-force_key_frames")
-                    .arg("expr:gte(t,n_forced*4)");
-
-                // Don't include audio in video variants - audio is encoded separately
-                cmd.arg("-an");
-
-                // Don't include subtitles in HLS output - they are extracted separately
-                cmd.arg("-sn");
-
-                cmd.arg("-hls_time")
-                    .arg("4")
-                    .arg("-hls_list_size")
-                    .arg("0")
-                    .arg("-hls_playlist_type")
-                    .arg("vod")
-                    .arg("-hls_segment_type")
-                    .arg("mpegts")
-                    .arg("-start_number")
-                    .arg("0")
-                    .arg("-hls_segment_filename")
-                    .arg(&segment_pattern)
-                    .arg(&playlist_path);
-
-                let output = cmd.output().await.context("failed to run ffmpeg")?;
-
-                if output.status.success() {
-                    break;
-                }
-
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-                // Check if this is a hardware encoder error and we can fallback
-                if current_encoder != EncoderType::Cpu && is_hardware_encoder_error(&stderr) {
-                    warn!(
-                        "Hardware encoder {:?} failed for variant {}, falling back to CPU: {}",
-                        current_encoder,
-                        variant.label,
-                        stderr.lines().next().unwrap_or(&stderr)
-                    );
-                    current_encoder = EncoderType::Cpu;
-                    last_error = Some(stderr);
-
-                    // Update progress to indicate fallback
-                    let fallback_progress = ProgressUpdate {
-                        stage: "FFmpeg processing".to_string(),
-                        current_chunk,
-                        total_chunks: total_variants,
-                        percentage,
-                        details: Some(format!(
-                            "Encoding variant: {} ({}p) - using CPU fallback",
-                            variant.label, variant.height
-                        )),
-                        status: "processing".to_string(),
-                        result: None,
-                        error: None,
-                        video_name: existing_video_name.clone(),
-                        created_at: existing_created_at,
-                    };
-                    progress
-                        .write()
-                        .await
-                        .insert(upload_id.clone(), fallback_progress);
-
-                    continue;
-                }
-
-                // Non-recoverable error
-                error!("FFmpeg failed for variant {}: {}", variant.label, stderr);
-                anyhow::bail!(
-                    "ffmpeg exited with status: {} for variant {}",
-                    output.status,
-                    variant.label
-                );
+                Ok(std::process::Output { status, stdout: Vec::new(), stderr })
             }
-
-            // Update progress for this variant
-            let current_chunk = (index + 1) as u32;
-            let percentage = (((current_chunk as f32) / (total_variants as f32)) * 100.0) as u32;
-            let updated_progress = ProgressUpdate {
-                stage: "FFmpeg processing".to_string(),
-                current_chunk,
-                total_chunks: total_variants,
-                percentage,
-                details: Some(format!("Encoded variant: {}", variant.label)),
-                status: "processing".to_string(),
-                result: None,
-                error: None,
-                video_name: existing_video_name,
-                created_at: existing_created_at,
-            };
-            progress
-                .write()
-                .await
-                .insert(upload_id.clone(), updated_progress);
-
-            Ok::<_, anyhow::Error>(())
-        });
-
-        encode_tasks.push(task);
+            _ = sleep(timeout_duration) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                if let Some(ref mut err) = stderr_handle {
+                    let _ = err.read_to_end(&mut stderr).await;
+                }
+                anyhow::bail!("ffmpeg timed out during {context_label} after {:?}", timeout_duration);
+            }
+        }
     }
 
-    // Encode each audio stream as a separate HLS audio playlist
-    let num_video_variants = variants.len();
-    for (audio_idx, audio_stream) in audio_streams.iter().enumerate() {
-        let input = Arc::clone(&input);
-        let out_dir = Arc::clone(&out_dir);
-        let semaphore = Arc::clone(&semaphore);
-        let progress = Arc::clone(&progress);
-        let upload_id = upload_id.clone();
-        let audio_stream = audio_stream.clone();
+    // Encode video variants sequentially (avoids spawning many tasks for large batches).
+    for (index, variant) in variants.clone().iter().enumerate() {
+        let seg_dir = out_dir.join(&variant.label);
+        fs::create_dir_all(&seg_dir).await?;
+        let playlist_path = seg_dir.join("index.m3u8");
+        let segment_pattern = seg_dir.join("segment_%03d.ts");
 
-        let task = tokio::task::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
+        info!(
+            "Encoding variant: {} at {}p with bitrate {}kbps (max: {}kbps)",
+            variant.label,
+            variant.height,
+            variant.bitrate,
+            variant.max_bitrate()
+        );
 
-            // Create audio directory with language/index identifier
-            let audio_label = audio_stream
-                .language
-                .clone()
-                .unwrap_or_else(|| format!("track_{}", audio_idx));
-            let audio_dir = out_dir.join(format!("audio_{}", audio_label));
-            fs::create_dir_all(&audio_dir).await?;
-            let playlist_path = audio_dir.join("index.m3u8");
-            let segment_pattern = audio_dir.join("segment_%03d.ts");
+        // Update progress before starting this variant
+        let current_chunk = (index + 1) as u32;
+        let percentage = ((current_chunk as f32 / total_steps as f32) * 100.0) as u32;
+        let (existing_video_name, existing_created_at) = {
+            let progress_map = progress.read().await;
+            progress_map
+                .get(&upload_id)
+                .map(|p| (p.video_name.clone(), p.created_at))
+                .unwrap_or((None, 0))
+        };
+        let start_progress = ProgressUpdate {
+            stage: "FFmpeg processing".to_string(),
+            current_chunk,
+            total_chunks: total_steps,
+            percentage,
+            details: Some(format!(
+                "Encoding variant: {} ({}p)",
+                variant.label, variant.height
+            )),
+            status: "processing".to_string(),
+            result: None,
+            error: None,
+            video_name: existing_video_name.clone(),
+            created_at: existing_created_at,
+        };
+        progress
+            .write()
+            .await
+            .insert(upload_id.clone(), start_progress);
 
-            info!(
-                "Encoding audio track {}: {} (codec: {}, channels: {:?})",
-                audio_idx, audio_label, audio_stream.codec_name, audio_stream.channels
-            );
+        // Try encoding with configured encoder, fallback to CPU if hardware fails
+        let mut current_encoder = encoder_type.clone();
+        let mut last_error: Option<String> = None;
 
-            // Update progress
-            let current_chunk = (num_video_variants + audio_idx + 1) as u32;
-            let percentage = ((current_chunk as f32 / total_variants as f32) * 100.0) as u32;
-            let (existing_video_name, existing_created_at) = {
-                let progress_map = progress.read().await;
-                progress_map
-                    .get(&upload_id)
-                    .map(|p| (p.video_name.clone(), p.created_at))
-                    .unwrap_or((None, 0))
-            };
-            let audio_progress = ProgressUpdate {
-                stage: "FFmpeg processing".to_string(),
-                current_chunk,
-                total_chunks: total_variants,
-                percentage,
-                details: Some(format!("Encoding audio track: {}", audio_label)),
-                status: "processing".to_string(),
-                result: None,
-                error: None,
-                video_name: existing_video_name.clone(),
-                created_at: existing_created_at,
-            };
-            progress
-                .write()
-                .await
-                .insert(upload_id.clone(), audio_progress);
+        loop {
+            // Clean up any partial output from previous attempt
+            if last_error.is_some() {
+                let _ = fs::remove_dir_all(&seg_dir).await;
+                fs::create_dir_all(&seg_dir).await?;
+            }
 
-            // Encode audio to HLS
             let mut cmd = Command::new("ffmpeg");
-            cmd.stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .arg("-loglevel")
-                .arg("error")
-                .arg("-y")
-                .arg("-i")
-                .arg(input.as_ref())
-                .arg("-map")
-                .arg(format!("0:a:{}", audio_idx))
-                .arg("-vn")
-                .arg("-c:a")
-                .arg("aac")
-                .arg("-b:a")
-                .arg("128k")
-                .arg("-ac")
-                .arg(if audio_stream.channels.unwrap_or(2) <= 2 {
-                    audio_stream.channels.unwrap_or(2).to_string()
-                } else {
-                    "2".to_string()
-                })
-                .arg("-hls_time")
+            cmd.arg("-loglevel").arg("error").arg("-y");
+
+            // Hardware acceleration setup
+            match current_encoder {
+                EncoderType::Nvenc => {
+                    cmd.arg("-hwaccel")
+                        .arg("cuda")
+                        .arg("-hwaccel_output_format")
+                        .arg("cuda");
+                }
+                EncoderType::Vaapi => {
+                    cmd.arg("-hwaccel")
+                        .arg("vaapi")
+                        .arg("-hwaccel_output_format")
+                        .arg("vaapi")
+                        .arg("-vaapi_device")
+                        .arg("/dev/dri/renderD128");
+                }
+                EncoderType::Qsv => {
+                    cmd.arg("-hwaccel")
+                        .arg("qsv")
+                        .arg("-hwaccel_output_format")
+                        .arg("qsv");
+                }
+                EncoderType::Cpu => {}
+            }
+
+            cmd.arg("-i").arg(&input);
+
+            // Scaling filter
+            let scale_filter = match current_encoder {
+                EncoderType::Nvenc => format!("scale_cuda=-2:{}", variant.height),
+                EncoderType::Vaapi => format!("scale_vaapi=-2:{}", variant.height),
+                EncoderType::Qsv => format!("vpp_qsv=w=-2:h={}", variant.height),
+                EncoderType::Cpu => format!("scale=-2:{}", variant.height),
+            };
+
+            cmd.arg("-c:v").arg(current_encoder.video_codec());
+
+            // Encoder specific settings
+            match current_encoder {
+                EncoderType::Nvenc => {
+                    cmd.arg("-preset")
+                        .arg("p3")
+                        .arg("-profile:v")
+                        .arg("main")
+                        .arg("-level:v")
+                        .arg("4.1")
+                        .arg("-rc:v")
+                        .arg("vbr")
+                        .arg("-rc-lookahead")
+                        .arg("20")
+                        .arg("-bf")
+                        .arg("3")
+                        .arg("-spatial-aq")
+                        .arg("1")
+                        .arg("-temporal-aq")
+                        .arg("1")
+                        .arg("-aq-strength")
+                        .arg("8");
+                }
+                EncoderType::Vaapi => {
+                    cmd.arg("-compression_level")
+                        .arg("20")
+                        .arg("-rc_mode")
+                        .arg("VBR")
+                        .arg("-profile:v")
+                        .arg("main");
+                }
+                EncoderType::Qsv => {
+                    cmd.arg("-preset")
+                        .arg("faster")
+                        .arg("-profile:v")
+                        .arg("main")
+                        .arg("-look_ahead")
+                        .arg("1")
+                        .arg("-look_ahead_depth")
+                        .arg("40");
+                }
+                EncoderType::Cpu => {
+                    cmd.arg("-preset")
+                        .arg("veryfast")
+                        .arg("-profile:v")
+                        .arg("main")
+                        .arg("-level:v")
+                        .arg("4.0");
+                }
+            }
+
+            cmd.arg("-b:v")
+                .arg(variant.bitrate_str())
+                .arg("-maxrate")
+                .arg(format!("{}k", variant.max_bitrate()))
+                .arg("-bufsize")
+                .arg(format!("{}k", variant.bufsize()))
+                .arg("-vf")
+                .arg(&scale_filter);
+
+            if matches!(current_encoder, EncoderType::Cpu) {
+                cmd.arg("-pix_fmt").arg("yuv420p");
+            }
+
+            cmd.arg("-g")
+                .arg(gop.to_string())
+                .arg("-keyint_min")
+                .arg(gop.to_string())
+                .arg("-sc_threshold")
+                .arg("0")
+                .arg("-force_key_frames")
+                .arg("expr:gte(t,n_forced*4)");
+
+            // Don't include audio in video variants - audio is encoded separately
+            cmd.arg("-an");
+
+            // Don't include subtitles in HLS output - they are extracted separately
+            cmd.arg("-sn");
+
+            cmd.arg("-hls_time")
                 .arg("4")
                 .arg("-hls_list_size")
                 .arg("0")
@@ -1013,77 +867,221 @@ pub async fn encode_to_hls(
                 .arg(&segment_pattern)
                 .arg(&playlist_path);
 
-            let output = cmd
-                .output()
-                .await
-                .context("failed to run ffmpeg for audio")?;
+            let output = run_ffmpeg_with_timeout(
+                cmd,
+                ffmpeg_timeout,
+                &format!("encoding variant {}", variant.label),
+            )
+            .await?;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(
-                    "FFmpeg audio encoding failed for track {}: {}",
-                    audio_idx, stderr
-                );
-                anyhow::bail!(
-                    "ffmpeg audio encoding failed for track {}: {}",
-                    audio_idx,
-                    stderr
-                );
+            if output.status.success() {
+                break;
             }
 
-            info!("Audio track {} encoded successfully", audio_label);
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-            Ok::<_, anyhow::Error>(())
-        });
+            // Check if this is a hardware encoder error and we can fallback
+            if current_encoder != EncoderType::Cpu && is_hardware_encoder_error(&stderr) {
+                warn!(
+                    "Hardware encoder {:?} failed for variant {}, falling back to CPU: {}",
+                    current_encoder,
+                    variant.label,
+                    stderr.lines().next().unwrap_or(&stderr)
+                );
+                current_encoder = EncoderType::Cpu;
+                last_error = Some(stderr);
 
-        encode_tasks.push(task);
+                // Update progress to indicate fallback
+                let fallback_progress = ProgressUpdate {
+                    stage: "FFmpeg processing".to_string(),
+                    current_chunk,
+                    total_chunks: total_steps,
+                    percentage,
+                    details: Some(format!(
+                        "Encoding variant: {} ({}p) - using CPU fallback",
+                        variant.label, variant.height
+                    )),
+                    status: "processing".to_string(),
+                    result: None,
+                    error: None,
+                    video_name: existing_video_name.clone(),
+                    created_at: existing_created_at,
+                };
+                progress
+                    .write()
+                    .await
+                    .insert(upload_id.clone(), fallback_progress);
+
+                continue;
+            }
+
+            // Non-recoverable error
+            error!("FFmpeg failed for variant {}: {}", variant.label, stderr);
+            anyhow::bail!(
+                "ffmpeg exited with status: {} for variant {}",
+                output.status,
+                variant.label
+            );
+        }
+
+        // Update progress for this variant
+        let updated_progress = ProgressUpdate {
+            stage: "FFmpeg processing".to_string(),
+            current_chunk,
+            total_chunks: total_steps,
+            percentage,
+            details: Some(format!("Encoded variant: {}", variant.label)),
+            status: "processing".to_string(),
+            result: None,
+            error: None,
+            video_name: existing_video_name,
+            created_at: existing_created_at,
+        };
+        progress
+            .write()
+            .await
+            .insert(upload_id.clone(), updated_progress);
+    }
+
+    // Encode each audio stream as a separate HLS audio playlist (sequential)
+    let num_video_variants = variants.len();
+    for (audio_idx, audio_stream) in audio_streams.iter().enumerate() {
+        let audio_label = audio_stream
+            .language
+            .clone()
+            .unwrap_or_else(|| format!("track_{}", audio_idx));
+        let audio_dir = out_dir.join(format!("audio_{}", audio_label));
+        fs::create_dir_all(&audio_dir).await?;
+        let playlist_path = audio_dir.join("index.m3u8");
+        let segment_pattern = audio_dir.join("segment_%03d.ts");
+
+        info!(
+            "Encoding audio track {}: {} (codec: {}, channels: {:?})",
+            audio_idx, audio_label, audio_stream.codec_name, audio_stream.channels
+        );
+
+        let current_chunk = (num_video_variants + audio_idx + 1) as u32;
+        let percentage = ((current_chunk as f32 / total_steps as f32) * 100.0) as u32;
+        let (existing_video_name, existing_created_at) = {
+            let progress_map = progress.read().await;
+            progress_map
+                .get(&upload_id)
+                .map(|p| (p.video_name.clone(), p.created_at))
+                .unwrap_or((None, 0))
+        };
+        let audio_progress = ProgressUpdate {
+            stage: "FFmpeg processing".to_string(),
+            current_chunk,
+            total_chunks: total_steps,
+            percentage,
+            details: Some(format!("Encoding audio track: {}", audio_label)),
+            status: "processing".to_string(),
+            result: None,
+            error: None,
+            video_name: existing_video_name.clone(),
+            created_at: existing_created_at,
+        };
+        progress
+            .write()
+            .await
+            .insert(upload_id.clone(), audio_progress);
+
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-loglevel")
+            .arg("error")
+            .arg("-y")
+            .arg("-i")
+            .arg(&input)
+            .arg("-map")
+            .arg(format!("0:a:{}", audio_idx))
+            .arg("-vn")
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-b:a")
+            .arg("128k")
+            .arg("-ac")
+            .arg(if audio_stream.channels.unwrap_or(2) <= 2 {
+                audio_stream.channels.unwrap_or(2).to_string()
+            } else {
+                "2".to_string()
+            })
+            .arg("-hls_time")
+            .arg("4")
+            .arg("-hls_list_size")
+            .arg("0")
+            .arg("-hls_playlist_type")
+            .arg("vod")
+            .arg("-hls_segment_type")
+            .arg("mpegts")
+            .arg("-start_number")
+            .arg("0")
+            .arg("-hls_segment_filename")
+            .arg(&segment_pattern)
+            .arg(&playlist_path);
+
+        let output = run_ffmpeg_with_timeout(
+            cmd,
+            ffmpeg_timeout,
+            &format!("encoding audio track {}", audio_label),
+        )
+        .await
+        .context("failed to run ffmpeg for audio")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!(
+                "FFmpeg audio encoding failed for track {}: {}",
+                audio_idx, stderr
+            );
+            anyhow::bail!(
+                "ffmpeg audio encoding failed for track {}: {}",
+                audio_idx,
+                stderr
+            );
+        }
+
+        info!("Audio track {} encoded successfully", audio_label);
     }
 
     // Generate thumbnail (single frame at 10% of video)
-    let input_thumbnail = Arc::clone(&input);
-    let out_dir_thumbnail = Arc::clone(&out_dir);
-    let thumbnail_task = tokio::task::spawn(async move {
-        let thumbnail_path = out_dir_thumbnail.join("thumbnail.jpg");
+    {
+        let thumbnail_path = out_dir.join("thumbnail.jpg");
         info!("Generating thumbnail: {:?}", thumbnail_path);
 
         let seek_time = (duration as f64 * 0.1).max(1.0);
 
-        let thumbnail_output = Command::new("ffmpeg")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .arg("-loglevel")
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-loglevel")
             .arg("error")
             .arg("-y")
             .arg("-ss")
             .arg(format!("{}", seek_time))
             .arg("-i")
-            .arg(input_thumbnail.as_ref())
+            .arg(&input)
             .arg("-vf")
             .arg("scale=480:-1")
             .arg("-frames:v")
             .arg("1")
             .arg("-q:v")
             .arg("2")
-            .arg(&thumbnail_path)
-            .output()
-            .await
-            .context("failed to generate thumbnail")?;
+            .arg(&thumbnail_path);
 
-        if !thumbnail_output.status.success() {
-            let stderr = String::from_utf8_lossy(&thumbnail_output.stderr);
-            error!("Thumbnail generation failed: {}", stderr);
+        match run_ffmpeg_with_timeout(cmd, ffmpeg_timeout, "generating thumbnail").await {
+            Ok(output) => {
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!("Thumbnail generation failed: {}", stderr);
+                }
+            }
+            Err(e) => {
+                error!("Thumbnail generation failed: {}", e);
+            }
         }
-
-        Ok::<_, anyhow::Error>(())
-    });
-
-    encode_tasks.push(thumbnail_task);
+    }
 
     // Generate sprites (preview thumbnails grid)
-    let input_thumb = Arc::clone(&input);
-    let out_dir_thumb = Arc::clone(&out_dir);
-    let thumb_task = tokio::task::spawn(async move {
-        let sprite_path = out_dir_thumb.join("sprites.jpg");
+    {
+        let sprite_path = out_dir.join("sprites.jpg");
         info!("Generating thumbnail sprite: {:?}", sprite_path);
 
         let target_frames = 100.0;
@@ -1095,50 +1093,38 @@ pub async fn encode_to_hls(
 
         let vf_filter = format!("fps={:.4},scale=160:-1,tile=10x10", fps);
 
-        let thumb_output = Command::new("ffmpeg")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .arg("-loglevel")
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-loglevel")
             .arg("error")
             .arg("-y")
             .arg("-i")
-            .arg(input_thumb.as_ref())
+            .arg(&input)
             .arg("-vf")
             .arg(&vf_filter)
             .arg("-frames:v")
             .arg("1")
             .arg("-q:v")
             .arg("5")
-            .arg(&sprite_path)
-            .output()
-            .await
-            .context("failed to generate thumbnail sprite")?;
+            .arg(&sprite_path);
 
-        if !thumb_output.status.success() {
-            let stderr = String::from_utf8_lossy(&thumb_output.stderr);
-            error!("Thumbnail sprite generation failed: {}", stderr);
+        match run_ffmpeg_with_timeout(cmd, ffmpeg_timeout, "generating sprites").await {
+            Ok(output) => {
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!("Thumbnail sprite generation failed: {}", stderr);
+                }
+            }
+            Err(e) => {
+                error!("Thumbnail sprite generation failed: {}", e);
+            }
         }
-
-        Ok::<_, anyhow::Error>(())
-    });
-
-    encode_tasks.push(thumb_task);
-
-    // Wait for all encoding and thumbnail tasks to complete
-    let results: Result<Vec<_>, _> = try_join_all(
-        encode_tasks
-            .into_iter()
-            .map(|handle| async move { handle.await.context("task panicked")? }),
-    )
-    .await;
-
-    results?;
+    }
 
     // Create master playlist with audio track support
     let master_playlist_path = out_dir.join("index.m3u8");
     let mut master_content = String::from("#EXTM3U\n#EXT-X-VERSION:3\n\n");
 
-    let variants_ref = get_variants_for_height(get_video_height(input.as_ref()).await?);
+    let variants_ref = get_variants_for_height(get_video_height(&input).await?);
 
     // Add audio tracks as EXT-X-MEDIA entries
     if !audio_streams.is_empty() {

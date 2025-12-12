@@ -141,7 +141,7 @@ pub async fn upload_video(
                             result: None,
                             error: None,
                             video_name: None,
-                            created_at: 0,
+                            created_at: now_millis(),
                         };
                         update_progress(&state.progress, &upload_id, progress_update).await;
                     }
@@ -197,7 +197,7 @@ pub async fn upload_video(
         result: None,
         error: None,
         video_name: Some(video_name.clone()),
-        created_at: 0,
+        created_at: now_millis(),
     };
     update_progress(&state.progress, &upload_id, initial_progress).await;
 
@@ -215,12 +215,13 @@ pub async fn upload_video(
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
 
-            let (video_duration, original_height) = tokio::join!(
-                get_video_duration(&video_path_clone),
-                get_video_height(&video_path_clone)
-            );
-            let video_duration = video_duration?;
-            let original_height = original_height?;
+            // Bound FFmpeg/ffprobe concurrency globally so large batch uploads
+            // don't spawn hundreds of FFmpeg processes and stall the pipeline.
+            let ffmpeg_permit = state_clone.ffmpeg_semaphore.acquire().await.unwrap();
+
+            // Run sequentially to keep the concurrency limit meaningful.
+            let video_duration = get_video_duration(&video_path_clone).await?;
+            let original_height = get_video_height(&video_path_clone).await?;
             let variants = get_variants_for_height(original_height);
             let available_resolutions: Vec<String> =
                 variants.iter().map(|v| v.label.clone()).collect();
@@ -235,7 +236,7 @@ pub async fn upload_video(
                 result: None,
                 error: None,
                 video_name: Some(video_name_clone.clone()),
-                created_at: 0,
+                created_at: now_millis(),
             };
             update_progress(&state_clone.progress, &upload_id_clone, encoding_progress).await;
 
@@ -249,7 +250,6 @@ pub async fn upload_video(
                 &hls_dir,
                 &state_clone.progress,
                 &upload_id_clone,
-                state_clone.ffmpeg_semaphore.clone(),
                 &state_clone.config.video.encoder,
                 video_duration,
                 &audio_streams,
@@ -297,6 +297,9 @@ pub async fn upload_video(
                 }
             }
 
+            // Release FFmpeg permit before network/upload work.
+            drop(ffmpeg_permit);
+
             let upload_progress = ProgressUpdate {
                 stage: "Upload to R2".to_string(),
                 current_chunk: 0,
@@ -307,7 +310,7 @@ pub async fn upload_video(
                 result: None,
                 error: None,
                 video_name: Some(video_name_clone.clone()),
-                created_at: 0,
+                created_at: now_millis(),
             };
             update_progress(&state_clone.progress, &upload_id_clone, upload_progress).await;
 
@@ -419,7 +422,7 @@ pub async fn upload_video(
                     result: Some(response),
                     error: None,
                     video_name: Some(video_name_clone.clone()),
-                    created_at: 0,
+                    created_at: now_millis(),
                 };
                 update_progress(&state_clone.progress, &upload_id_clone, completion_progress).await;
             }
@@ -435,7 +438,7 @@ pub async fn upload_video(
                     result: None,
                     error: Some(e.to_string()),
                     video_name: Some(video_name_clone.clone()),
-                    created_at: 0,
+                    created_at: now_millis(),
                 };
                 update_progress(&state_clone.progress, &upload_id_clone, error_progress).await;
             }
@@ -627,7 +630,7 @@ pub async fn upload_chunk(
         result: None,
         error: None,
         video_name: Some(file_name.replace(&['.'][..], "_")),
-        created_at: 0,
+        created_at: now_millis(),
     };
     update_progress(&state.progress, &upload_id, progress).await;
 
@@ -684,7 +687,7 @@ pub async fn finalize_chunked_upload(
         result: None,
         error: None,
         video_name: Some(body.name.clone()),
-        created_at: 0,
+        created_at: now_millis(),
     };
     update_progress(&state.progress, &upload_id, progress).await;
     let final_path =
@@ -735,7 +738,7 @@ pub async fn finalize_chunked_upload(
         result: None,
         error: None,
         video_name: Some(video_name.clone()),
-        created_at: 0,
+        created_at: now_millis(),
     };
     update_progress(&state.progress, &upload_id, progress).await;
     let state_clone = state.clone();
@@ -752,12 +755,13 @@ pub async fn finalize_chunked_upload(
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
 
-            let (video_duration, original_height) = tokio::join!(
-                get_video_duration(&video_path_clone),
-                get_video_height(&video_path_clone)
-            );
-            let video_duration = video_duration?;
-            let original_height = original_height?;
+            // Bound FFmpeg/ffprobe concurrency globally so large batch uploads
+            // don't spawn hundreds of FFmpeg processes and stall the pipeline.
+            let ffmpeg_permit = state_clone.ffmpeg_semaphore.acquire().await.unwrap();
+
+            // Run sequentially to keep the concurrency limit meaningful.
+            let video_duration = get_video_duration(&video_path_clone).await?;
+            let original_height = get_video_height(&video_path_clone).await?;
             let variants = get_variants_for_height(original_height);
             let available_resolutions: Vec<String> =
                 variants.iter().map(|v| v.label.clone()).collect();
@@ -772,7 +776,7 @@ pub async fn finalize_chunked_upload(
                 result: None,
                 error: None,
                 video_name: Some(video_name_clone.clone()),
-                created_at: 0,
+                created_at: now_millis(),
             };
             update_progress(&state_clone.progress, &upload_id_clone, encoding_progress).await;
 
@@ -786,7 +790,6 @@ pub async fn finalize_chunked_upload(
                 &hls_dir,
                 &state_clone.progress,
                 &upload_id_clone,
-                state_clone.ffmpeg_semaphore.clone(),
                 &state_clone.config.video.encoder,
                 video_duration,
                 &audio_streams,
@@ -834,6 +837,9 @@ pub async fn finalize_chunked_upload(
                 }
             }
 
+            // Release FFmpeg permit before network/upload work.
+            drop(ffmpeg_permit);
+
             let upload_progress = ProgressUpdate {
                 stage: "Upload to R2".to_string(),
                 current_chunk: 0,
@@ -844,7 +850,7 @@ pub async fn finalize_chunked_upload(
                 result: None,
                 error: None,
                 video_name: Some(video_name_clone.clone()),
-                created_at: 0,
+                created_at: now_millis(),
             };
             update_progress(&state_clone.progress, &upload_id_clone, upload_progress).await;
 
@@ -956,7 +962,7 @@ pub async fn finalize_chunked_upload(
                     result: Some(response),
                     error: None,
                     video_name: Some(video_name_clone.clone()),
-                    created_at: 0,
+                    created_at: now_millis(),
                 };
                 update_progress(&state_clone.progress, &upload_id_clone, completion_progress).await;
             }
@@ -972,7 +978,7 @@ pub async fn finalize_chunked_upload(
                     result: None,
                     error: Some(e.to_string()),
                     video_name: Some(video_name_clone.clone()),
-                    created_at: 0,
+                    created_at: now_millis(),
                 };
                 update_progress(&state_clone.progress, &upload_id_clone, error_progress).await;
             }
