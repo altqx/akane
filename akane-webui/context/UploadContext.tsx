@@ -38,7 +38,7 @@ interface UploadContextType {
 
 const UploadContext = createContext<UploadContextType | undefined>(undefined)
 
-const CHUNK_SIZE = 50 * 1024 * 1024
+const CHUNK_SIZE = 10 * 1024 * 1024
 const MAX_CONCURRENT_CHUNKS = 1
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY = 1000
@@ -160,8 +160,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
             xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
             xhr.addEventListener('timeout', () => reject(new Error('Chunk upload timed out')))
 
-            // Shorter timeout for faster failure detection and retry through Cloudflare Tunnels
-            xhr.timeout = 60_000 // 60 seconds - fail faster & retry sooner
+            // Longer timeout for better reliability
+            xhr.timeout = 300_000 // 300 seconds (5 minutes)
 
             if (signal) {
               signal.addEventListener('abort', () => xhr.abort())
@@ -347,57 +347,89 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       onProgress: (progress: number, bytesUploaded: number) => void,
       signal?: AbortSignal
     ): Promise<void> => {
-      return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        const formData = new FormData()
+      let lastError: Error | null = null
 
-        formData.append('file', file)
-        formData.append('name', videoName)
-        if (fileTags.trim()) {
-          formData.append('tags', fileTags.trim())
-        }
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        if (signal?.aborted) throw new Error('Upload cancelled')
 
-        xhr.upload.addEventListener('progress', (event) => {
-          if (event.lengthComputable) {
-            onProgress(Math.round((event.loaded / event.total) * 100), event.loaded)
-          }
-        })
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const xhr = new XMLHttpRequest()
+            const formData = new FormData()
 
-        xhr.addEventListener('load', () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve()
-          } else {
-            let errorMsg = 'Upload failed'
-            try {
-              const response = JSON.parse(xhr.responseText)
-              errorMsg = response.error || response.message || errorMsg
-            } catch {
-              errorMsg = xhr.responseText || errorMsg
+            formData.append('file', file)
+            formData.append('name', videoName)
+            if (fileTags.trim()) {
+              formData.append('tags', fileTags.trim())
             }
-            reject(new Error(errorMsg))
+
+            xhr.upload.addEventListener('progress', (event) => {
+              if (event.lengthComputable) {
+                onProgress(Math.round((event.loaded / event.total) * 100), event.loaded)
+              }
+            })
+
+            xhr.addEventListener('load', () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                resolve()
+              } else {
+                let errorMsg = 'Upload failed'
+                try {
+                  const response = JSON.parse(xhr.responseText)
+                  errorMsg = response.error || response.message || errorMsg
+                } catch {
+                  errorMsg = xhr.responseText || errorMsg
+                }
+                reject(new Error(errorMsg))
+              }
+            })
+
+            xhr.addEventListener('error', () => reject(new Error('Network error during upload')))
+            xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
+            xhr.addEventListener('timeout', () => reject(new Error('Upload timed out')))
+
+            // Handle abort signal
+            if (signal) {
+              signal.addEventListener('abort', () => xhr.abort())
+            }
+
+            // Longer timeout for better reliability
+            xhr.timeout = 300_000 // 300 seconds (5 minutes)
+
+            const apiBase = getApiBaseUrl()
+            xhr.open('POST', `${apiBase}/api/upload`)
+            xhr.setRequestHeader('X-Upload-ID', uploadId)
+            if (token) {
+              xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+            }
+            xhr.send(formData)
+          })
+
+          // Success
+          return
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err))
+
+          // Don't retry if explicitly cancelled
+          if (lastError.message === 'Upload cancelled') {
+            throw lastError
           }
-        })
 
-        xhr.addEventListener('error', () => reject(new Error('Network error during upload')))
-        xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
-        xhr.addEventListener('timeout', () => reject(new Error('Upload timed out')))
-
-        // Handle abort signal
-        if (signal) {
-          signal.addEventListener('abort', () => xhr.abort())
+          // Wait before retrying
+          if (attempt < MAX_RETRIES) {
+            const delay = RETRY_BASE_DELAY * Math.pow(2, attempt)
+            console.warn(
+              `Upload failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms...`,
+              lastError.message
+            )
+            await new Promise((resolve) => setTimeout(resolve, delay))
+            // Reset progress
+            onProgress(0, 0)
+          }
         }
+      }
 
-        // Shorter timeout for faster failure detection through Cloudflare Tunnels
-        xhr.timeout = 60_000 // 60 seconds - matches chunked upload timeout
-
-        const apiBase = getApiBaseUrl()
-        xhr.open('POST', `${apiBase}/api/upload`)
-        xhr.setRequestHeader('X-Upload-ID', uploadId)
-        if (token) {
-          xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-        }
-        xhr.send(formData)
-      })
+      throw lastError || new Error('Upload failed after retries')
     },
     []
   )
