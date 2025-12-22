@@ -12,6 +12,7 @@ interface QueueItem {
   status: string
   video_name: string | null
   created_at: number // Unix timestamp in milliseconds for queue ordering
+  variant_percentage?: number // 0-100, progress within current encoding variant
 }
 
 interface QueueListResponse {
@@ -29,6 +30,75 @@ function formatSince(timestampMs: number | null | undefined) {
   const hours = Math.floor(deltaSec / 3600)
   const minutes = Math.floor((deltaSec % 3600) / 60)
   return `${hours}h ${minutes}m ago`
+}
+
+// Get stage icon and color for visual distinction
+function getStageInfo(stage: string): { icon: string; color: string; label: string } {
+  const stageLower = stage.toLowerCase()
+  if (stageLower.includes('receiving') || stageLower.includes('chunk')) {
+    return { icon: '↑', color: 'text-info', label: 'Uploading' }
+  }
+  if (stageLower.includes('assembling')) {
+    return { icon: '⚙', color: 'text-warning', label: 'Assembling' }
+  }
+  if (stageLower.includes('ffmpeg') || stageLower.includes('encoding') || stageLower.includes('processing')) {
+    return { icon: '⚡', color: 'text-warning', label: 'Encoding' }
+  }
+  if (stageLower.includes('upload') && stageLower.includes('r2')) {
+    return { icon: '☁', color: 'text-info', label: 'Uploading to R2' }
+  }
+  if (stageLower.includes('queued')) {
+    return { icon: '⏳', color: 'text-base-content/60', label: 'Queued' }
+  }
+  if (stageLower.includes('initializing')) {
+    return { icon: '◌', color: 'text-base-content/60', label: 'Initializing' }
+  }
+  if (stageLower.includes('completed')) {
+    return { icon: '✓', color: 'text-success', label: 'Completed' }
+  }
+  if (stageLower.includes('failed') || stageLower.includes('cancelled')) {
+    return { icon: '✗', color: 'text-error', label: stage }
+  }
+  return { icon: '●', color: 'text-warning', label: stage }
+}
+
+// Calculate effective percentage based on stage for smoother progress bar
+function getEffectiveProgress(item: QueueItem): number {
+  const stageLower = item.stage.toLowerCase()
+
+  // Receiving chunks: 0-30%
+  if (stageLower.includes('receiving') || stageLower.includes('chunk')) {
+    const chunkProgress = item.total_chunks > 0 ? (item.current_chunk / item.total_chunks) * 100 : item.percentage
+    return Math.round(chunkProgress * 0.3)
+  }
+
+  // Assembling: 30-35%
+  if (stageLower.includes('assembling')) {
+    return 30 + Math.round(item.percentage * 0.05)
+  }
+
+  // FFmpeg encoding: 35-85% - use percentage directly (tracks processed out of order)
+  if (stageLower.includes('ffmpeg') || stageLower.includes('encoding')) {
+    const trackProgress = item.total_chunks > 0 ? (item.current_chunk / item.total_chunks) * 100 : item.percentage
+    return 35 + Math.round(trackProgress * 0.5)
+  }
+
+  // Upload to R2: 85-100%
+  if (stageLower.includes('upload') && stageLower.includes('r2')) {
+    return 85 + Math.round(item.percentage * 0.15)
+  }
+
+  // Queued/Initializing: 0%
+  if (stageLower.includes('queued') || stageLower.includes('initializing')) {
+    return 0
+  }
+
+  // Completed: 100%
+  if (stageLower.includes('completed')) {
+    return 100
+  }
+
+  return item.percentage
 }
 
 export default function ProcessingQueues() {
@@ -76,10 +146,7 @@ export default function ProcessingQueues() {
 
   const isCancellable = (item: QueueItem) => {
     const cancellableStages = ['Initializing upload', 'Queued for processing', 'Receiving chunks']
-    return (
-      item.status === 'initializing' ||
-      (item.status === 'processing' && cancellableStages.includes(item.stage))
-    )
+    return item.status === 'initializing' || (item.status === 'processing' && cancellableStages.includes(item.stage))
   }
 
   const handleCancel = async (uploadId: string) => {
@@ -290,11 +357,7 @@ export default function ProcessingQueues() {
               disabled={isCleaning}
               title='Clean up stale uploads'
             >
-              {isCleaning ? (
-                <span className='loading loading-spinner loading-xs'></span>
-              ) : (
-                'Cleanup'
-              )}
+              {isCleaning ? <span className='loading loading-spinner loading-xs'></span> : 'Cleanup'}
             </button>
             <span className='text-[11px] text-base-content/60'>Updated {formatSince(lastUpdatedAt)}</span>
             <svg
@@ -338,12 +401,14 @@ export default function ProcessingQueues() {
                           <span className='loading loading-spinner loading-xs'></span>
                           <div className='flex flex-col'>
                             <span
-                              className='font-medium text-sm truncate max-w-[250px]'
+                              className='font-medium text-sm truncate max-w-62.5'
                               title={item.video_name || item.upload_id}
                             >
                               {item.video_name || `${item.upload_id.substring(0, 8)}...`}
                             </span>
-                            <span className='text-[11px] text-base-content/60'>Started {formatSince(item.created_at)}</span>
+                            <span className='text-[11px] text-base-content/60'>
+                              Started {formatSince(item.created_at)}
+                            </span>
                             {item.video_name && (
                               <span className='text-xs text-base-content/50'>
                                 ID: {item.upload_id.substring(0, 8)}...
@@ -393,14 +458,30 @@ export default function ProcessingQueues() {
                       </div>
                       <progress
                         className='progress progress-primary w-full h-2'
-                        value={item.percentage}
+                        value={getEffectiveProgress(item)}
                         max='100'
                       ></progress>
+                      {/* Show variant progress during FFmpeg encoding */}
+                      {item.stage.toLowerCase().includes('ffmpeg') &&
+                        item.variant_percentage !== undefined &&
+                        item.variant_percentage < 100 && (
+                          <div className='flex items-center gap-2 text-xs text-base-content/70 mt-1'>
+                            <span>Current track:</span>
+                            <progress
+                              className='progress progress-info w-24 h-1.5'
+                              value={item.variant_percentage}
+                              max='100'
+                            />
+                            <span>{item.variant_percentage}%</span>
+                          </div>
+                        )}
                       <div className='flex justify-between mt-1 text-xs text-base-content/70'>
                         <div className='flex flex-wrap items-center gap-2'>
-                          <span className='badge badge-ghost badge-xs'>{item.stage}</span>
+                          <span className={`badge badge-ghost badge-xs ${getStageInfo(item.stage).color}`}>
+                            {getStageInfo(item.stage).icon} {getStageInfo(item.stage).label}
+                          </span>
                           {item.details && (
-                            <span className='truncate max-w-[200px]' title={item.details}>
+                            <span className='truncate max-w-50' title={item.details}>
                               {item.details}
                             </span>
                           )}
@@ -440,7 +521,7 @@ export default function ProcessingQueues() {
                         >
                           <polyline points='20 6 9 17 4 12' />
                         </svg>
-                        <span className='text-sm truncate max-w-[250px]' title={item.video_name || item.upload_id}>
+                        <span className='text-sm truncate max-w-62.5' title={item.video_name || item.upload_id}>
                           {item.video_name || `${item.upload_id.substring(0, 8)}...`}
                         </span>
                         <span className='text-[11px] text-base-content/60'>Queued {formatSince(item.created_at)}</span>
@@ -512,14 +593,14 @@ export default function ProcessingQueues() {
                           <line x1='15' x2='9' y1='9' y2='15' />
                           <line x1='9' x2='15' y1='9' y2='15' />
                         </svg>
-                        <span className='text-sm truncate max-w-[250px]' title={item.video_name || item.upload_id}>
+                        <span className='text-sm truncate max-w-62.5' title={item.video_name || item.upload_id}>
                           {item.video_name || `${item.upload_id.substring(0, 8)}...`}
                         </span>
                         <span className='text-[11px] text-base-content/60'>Started {formatSince(item.created_at)}</span>
                       </div>
                       <div className='flex items-center gap-2'>
                         {item.details && (
-                          <span className='text-xs text-error truncate max-w-[150px]' title={item.details}>
+                          <span className='text-xs text-error truncate max-w-37.5' title={item.details}>
                             {item.details}
                           </span>
                         )}

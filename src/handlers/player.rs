@@ -358,6 +358,7 @@ pub async fn get_player(
             // Build quality menu
             buildQualityMenu();
             buildAudioMenu();
+            buildSpeedMenu();
 
             // Play/Pause
             playBtn.onclick = togglePlay;
@@ -490,22 +491,35 @@ pub async fn get_player(
                     e.stopPropagation();
                     qualityMenu.classList.remove('show');
                     if (subtitleMenu) subtitleMenu.classList.remove('show');
+                    if (speedMenu) speedMenu.classList.remove('show');
                     audioMenu.classList.toggle('show');
                 }};
             }}
+            // Declare speed elements before they're used in handlers
+            const speedBtn = document.getElementById('speedBtn');
+            const speedMenu = document.getElementById('speedMenu');
             if (subtitleBtn && subtitleMenu) {{
                 subtitleBtn.onclick = (e) => {{
                     e.stopPropagation();
                     qualityMenu.classList.remove('show');
                     if (audioMenu) audioMenu.classList.remove('show');
+                    if (speedMenu) speedMenu.classList.remove('show');
                     subtitleMenu.classList.toggle('show');
                 }};
             }}
-            document.onclick = () => {{
-                qualityMenu.classList.remove('show');
-                if (audioMenu) audioMenu.classList.remove('show');
-                if (subtitleMenu) subtitleMenu.classList.remove('show');
-            }};
+            if (speedBtn && speedMenu) {{
+                speedBtn.onclick = (e) => {{
+                    e.stopPropagation();
+                    qualityMenu.classList.remove('show');
+                    if (audioMenu) audioMenu.classList.remove('show');
+                    if (subtitleMenu) subtitleMenu.classList.remove('show');
+                    speedMenu.classList.toggle('show');
+                }};
+            }}
+            const pipBtn = document.getElementById('pipBtn');
+            if (pipBtn) {{
+                pipBtn.onclick = () => togglePiP();
+            }}
 
             // Keyboard shortcuts
             document.onkeydown = (e) => {{
@@ -541,22 +555,73 @@ pub async fn get_player(
                         e.preventDefault();
                         video.currentTime = Math.min(video.duration, video.currentTime + 10);
                         break;
+                    case ',':
+                        e.preventDefault();
+                        changeSpeed(-1);
+                        break;
+                    case '.':
+                        e.preventDefault();
+                        changeSpeed(1);
+                        break;
+                    case 'p':
+                        e.preventDefault();
+                        togglePiP();
+                        break;
                 }}
             }};
 
             // Auto-hide controls
             let hideTimeout;
-            container.onmousemove = () => {{
+            let isTouching = false;
+            let contextMenuOpen = false;
+            
+            const showControls = (duration = 3000) => {{
                 controls.classList.add('show');
                 clearTimeout(hideTimeout);
-                hideTimeout = setTimeout(() => {{
-                    if (!video.paused) controls.classList.remove('show');
-                }}, 3000);
+                if (duration > 0) {{
+                    hideTimeout = setTimeout(() => {{
+                        if (!video.paused && !isTouching && !contextMenuOpen) {{
+                            controls.classList.remove('show');
+                        }}
+                    }}, duration);
+                }}
             }};
+            
+            container.onmousemove = () => showControls(3000);
             container.onmouseleave = () => {{
-                if (!video.paused) controls.classList.remove('show');
+                if (!video.paused && !contextMenuOpen) controls.classList.remove('show');
             }};
+            
+            // Touch-friendly: longer visibility on touch
+            container.ontouchstart = () => {{
+                isTouching = true;
+                showControls(5000); // 5 seconds on touch
+            }};
+            container.ontouchend = () => {{
+                isTouching = false;
+                showControls(5000);
+            }};
+            
+            // Right-click context menu handling
+            container.oncontextmenu = () => {{
+                contextMenuOpen = true;
+                showControls(0); // Keep visible indefinitely
+            }};
+            document.onclick = (e) => {{
+                contextMenuOpen = false;
+                qualityMenu.classList.remove('show');
+                if (audioMenu) audioMenu.classList.remove('show');
+                if (subtitleMenu) subtitleMenu.classList.remove('show');
+                if (speedMenu) speedMenu.classList.remove('show');
+                if (!video.paused) showControls(3000);
+            }};
+            
             controls.classList.add('show');
+            
+            // Build chapter markers if available
+            if (chapters.length > 0) {{
+                buildChapterMarkers();
+            }}
         }}
 
         function buildQualityMenu() {{
@@ -709,6 +774,77 @@ pub async fn get_player(
             }}
         }}
 
+        // Playback speed control
+        const speeds = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+        let currentSpeedIdx = 2; // 1x default
+        
+        function buildSpeedMenu() {{
+            const menu = document.getElementById('speedMenu');
+            if (!menu) return;
+            
+            menu.innerHTML = '';
+            speeds.forEach((speed, idx) => {{
+                const label = speed === 1 ? 'Normal' : speed + 'x';
+                menu.innerHTML += `<div class="menu-item" data-speed="${{speed}}" data-idx="${{idx}}">${{label}}</div>`;
+            }});
+            
+            menu.querySelectorAll('.menu-item').forEach(item => {{
+                item.onclick = (e) => {{
+                    e.stopPropagation();
+                    const speed = parseFloat(item.dataset.speed);
+                    currentSpeedIdx = parseInt(item.dataset.idx);
+                    video.playbackRate = speed;
+                    menu.querySelectorAll('.menu-item').forEach(i => i.classList.remove('active'));
+                    item.classList.add('active');
+                    menu.classList.remove('show');
+                }};
+            }});
+            menu.querySelectorAll('.menu-item')[currentSpeedIdx]?.classList.add('active');
+        }}
+        
+        function changeSpeed(direction) {{
+            currentSpeedIdx = Math.max(0, Math.min(speeds.length - 1, currentSpeedIdx + direction));
+            video.playbackRate = speeds[currentSpeedIdx];
+            const menu = document.getElementById('speedMenu');
+            if (menu) {{
+                menu.querySelectorAll('.menu-item').forEach((item, idx) => {{
+                    item.classList.toggle('active', idx === currentSpeedIdx);
+                }});
+            }}
+        }}
+        
+        // Picture-in-Picture
+        async function togglePiP() {{
+            try {{
+                if (document.pictureInPictureElement) {{
+                    await document.exitPictureInPicture();
+                }} else if (document.pictureInPictureEnabled && video) {{
+                    await video.requestPictureInPicture();
+                }}
+            }} catch (e) {{
+                console.warn('PiP error:', e);
+            }}
+        }}
+        
+        // Chapter markers on progress bar
+        function buildChapterMarkers() {{
+            const progress = document.getElementById('progress');
+            if (!progress || !video || !isFinite(video.duration)) return;
+            
+            // Remove existing markers
+            progress.querySelectorAll('.chapter-marker').forEach(m => m.remove());
+            
+            chapters.forEach(ch => {{
+                if (ch.start > 0 && ch.start < video.duration) {{
+                    const marker = document.createElement('div');
+                    marker.className = 'chapter-marker';
+                    marker.style.left = (ch.start / video.duration * 100) + '%';
+                    marker.title = ch.title;
+                    progress.appendChild(marker);
+                }}
+            }});
+        }}
+
         function startHeartbeat() {{
             fetch('/api/videos/{video_id}/heartbeat', {{ method: 'POST' }});
             setInterval(() => {{
@@ -823,6 +959,10 @@ pub async fn get_player(
         .menu-item {{ padding: 10px 16px; color: #fff; font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 8px; }}
         .menu-item:hover {{ background: rgba(255,255,255,0.08); }}
         .menu-item.active {{ color: #e50914; }}
+        
+        /* Chapter markers */
+        .chapter-marker {{ position: absolute; top: 0; width: 3px; height: 100%; background: rgba(255,255,255,0.5); transform: translateX(-50%); z-index: 2; cursor: pointer; }}
+        .chapter-marker:hover {{ background: #fff; }}
     </style>
 </head>
 <body>
@@ -858,6 +998,11 @@ pub async fn get_player(
                 <div id="audioMenu" class="menu"></div>
             </div>
             {subtitle_controls}
+            <div class="menu-wrap">
+                <button id="speedBtn" class="ctrl-btn" aria-label="Playback Speed"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M10 8v8l6-4-6-4zm1-5C6.48 3 3 6.48 3 11s3.48 8 8 8 8-3.48 8-8-3.48-8-8-8zm0 14c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"/></svg></button>
+                <div id="speedMenu" class="menu"></div>
+            </div>
+            <button id="pipBtn" class="ctrl-btn" aria-label="Picture in Picture"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M19 7h-8v6h8V7zm2-4H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14z"/></svg></button>
             <button id="fullscreenBtn" class="ctrl-btn"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg></button>
         </div>
     </div>

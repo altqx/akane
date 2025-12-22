@@ -182,11 +182,13 @@ pub async fn get_attachments(input: &PathBuf) -> Result<Vec<AttachmentInfo>> {
                         let lowercase = filename.to_lowercase();
                         if lowercase.ends_with(".ttf") {
                             "font/ttf"
-                        } else if filename.ends_with(".otf") {
+                        } else if lowercase.ends_with(".otf") {
                             "font/otf"
-                        } else if filename.ends_with(".woff") {
+                        } else if lowercase.ends_with(".ttc") {
+                            "font/collection"
+                        } else if lowercase.ends_with(".woff") {
                             "font/woff"
-                        } else if filename.ends_with(".woff2") {
+                        } else if lowercase.ends_with(".woff2") {
                             "font/woff2"
                         } else {
                             "application/octet-stream"
@@ -505,23 +507,35 @@ pub async fn extract_all_attachments(input: &PathBuf, output_dir: &PathBuf) -> R
 }
 
 pub fn get_variants_for_height(original_height: u32) -> Vec<VideoVariant> {
-    let all_variants = vec![
-        VideoVariant::new("480p", 480),
-        VideoVariant::new("720p", 720),
-        VideoVariant::new("1080p", 1080),
-        VideoVariant::new("1440p", 1440),
+    let resolution_tiers: [(u32, &str); 6] = [
+        (360, "360p"),
+        (480, "480p"),
+        (720, "720p"),
+        (1080, "1080p"),
+        (1440, "1440p"),
+        (2160, "4K"),
     ];
 
-    // Only include variants at or below the original resolution
-    all_variants
-        .into_iter()
-        .filter(|v| v.height <= original_height)
-        .collect()
+    // Generate variants dynamically with calculated bitrates
+    let mut variants: Vec<VideoVariant> = resolution_tiers
+        .iter()
+        .filter(|(height, _)| *height <= original_height)
+        .map(|(height, label)| VideoVariant::new(label, *height))
+        .collect();
+
+    // If no standard tier fits (video shorter than 360p), use original height
+    if variants.is_empty() {
+        let label = format!("{}p", original_height);
+        variants.push(VideoVariant::new(&label, original_height));
+    }
+
+    variants
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum EncoderType {
     Nvenc,
+    Amf,
     Vaapi,
     Qsv,
     Cpu,
@@ -531,6 +545,8 @@ impl EncoderType {
     fn from_string(s: &str) -> Self {
         if s.contains("nvenc") {
             EncoderType::Nvenc
+        } else if s.contains("amf") {
+            EncoderType::Amf
         } else if s.contains("vaapi") {
             EncoderType::Vaapi
         } else if s.contains("qsv") {
@@ -544,6 +560,7 @@ impl EncoderType {
     fn video_codec(&self) -> &'static str {
         match self {
             EncoderType::Nvenc => "h264_nvenc",
+            EncoderType::Amf => "h264_amf",
             EncoderType::Vaapi => "h264_vaapi",
             EncoderType::Qsv => "h264_qsv",
             EncoderType::Cpu => "libx264",
@@ -554,6 +571,7 @@ impl EncoderType {
 /// Check if an FFmpeg error indicates hardware encoder failure that should fallback to CPU
 fn is_hardware_encoder_error(stderr: &str) -> bool {
     let hw_error_patterns = [
+        // NVENC specific errors
         "Hardware is lacking required capabilities",
         "Provided device doesn't support required NVENC features",
         "NVENC features",
@@ -569,10 +587,16 @@ fn is_hardware_encoder_error(stderr: &str) -> bool {
         "Device creation failed",
         "No VAAPI support",
         "DRM setup failed",
+        // AMF specific errors
+        "AMF failed",
+        "Failed to initialise AMF",
+        "No AMD devices found",
+        // Generic encoder errors that suggest hardware incompatibility
         "Error while opening encoder",
         "maybe incorrect parameters",
         "Error sending frames to consumers",
         "Function not implemented",
+        // 10-bit / HDR related
         "Incompatible pixel format",
         "does not support the pixel format",
     ];
@@ -718,6 +742,7 @@ pub async fn encode_to_hls(
             error: None,
             video_name: existing_video_name.clone(),
             created_at: existing_created_at,
+            variant_percentage: None,
         };
         progress
             .write()
@@ -746,6 +771,12 @@ pub async fn encode_to_hls(
                         .arg("-hwaccel_output_format")
                         .arg("cuda");
                 }
+                EncoderType::Amf => {
+                    cmd.arg("-hwaccel")
+                        .arg("d3d11va")
+                        .arg("-hwaccel_output_format")
+                        .arg("d3d11");
+                }
                 EncoderType::Vaapi => {
                     cmd.arg("-hwaccel")
                         .arg("vaapi")
@@ -768,6 +799,7 @@ pub async fn encode_to_hls(
             // Scaling filter
             let scale_filter = match current_encoder {
                 EncoderType::Nvenc => format!("scale_cuda=-2:{}", variant.height),
+                EncoderType::Amf => format!("scale=-2:{}", variant.height), // AMF uses software scale
                 EncoderType::Vaapi => format!("scale_vaapi=-2:{}", variant.height),
                 EncoderType::Qsv => format!("vpp_qsv=w=-2:h={}", variant.height),
                 EncoderType::Cpu => format!("scale=-2:{}", variant.height),
@@ -796,6 +828,18 @@ pub async fn encode_to_hls(
                         .arg("1")
                         .arg("-aq-strength")
                         .arg("8");
+                }
+                EncoderType::Amf => {
+                    cmd.arg("-quality")
+                        .arg("balanced")
+                        .arg("-profile:v")
+                        .arg("main")
+                        .arg("-level")
+                        .arg("4.1")
+                        .arg("-rc")
+                        .arg("vbr_latency")
+                        .arg("-bf")
+                        .arg("3");
                 }
                 EncoderType::Vaapi => {
                     cmd.arg("-compression_level")
@@ -906,6 +950,7 @@ pub async fn encode_to_hls(
                     error: None,
                     video_name: existing_video_name.clone(),
                     created_at: existing_created_at,
+                    variant_percentage: None,
                 };
                 progress
                     .write()
@@ -936,6 +981,7 @@ pub async fn encode_to_hls(
             error: None,
             video_name: existing_video_name,
             created_at: existing_created_at,
+            variant_percentage: None,
         };
         progress
             .write()
@@ -980,6 +1026,7 @@ pub async fn encode_to_hls(
             error: None,
             video_name: existing_video_name.clone(),
             created_at: existing_created_at,
+            variant_percentage: None,
         };
         progress
             .write()

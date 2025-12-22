@@ -6,9 +6,9 @@ use crate::types::{
     ProgressResponse, ProgressUpdate, QueueItem, QueueListResponse, UploadAccepted, UploadResponse,
 };
 use crate::video::{
-    encode_to_hls, extract_all_attachments, extract_subtitle, get_attachments, get_audio_streams,
-    get_chapters, get_subtitle_streams, get_variants_for_height, get_video_duration,
-    get_video_height,
+    encode_to_hls, extract_all_attachments, extract_subtitle, extract_vobsub_subtitle,
+    get_attachments, get_audio_streams, get_chapters, get_subtitle_extension, get_subtitle_streams,
+    get_variants_for_height, get_video_duration, get_video_height, is_vobsub_subtitle,
 };
 
 use axum::{
@@ -90,6 +90,7 @@ pub async fn upload_video(
             error: None,
             video_name: None,
             created_at: now_millis(),
+            variant_percentage: None,
         };
         state
             .progress
@@ -142,6 +143,7 @@ pub async fn upload_video(
                             error: None,
                             video_name: None,
                             created_at: now_millis(),
+                            variant_percentage: None,
                         };
                         update_progress(&state.progress, &upload_id, progress_update).await;
                     }
@@ -198,6 +200,7 @@ pub async fn upload_video(
         error: None,
         video_name: Some(video_name.clone()),
         created_at: now_millis(),
+        variant_percentage: None,
     };
     update_progress(&state.progress, &upload_id, initial_progress).await;
 
@@ -237,6 +240,7 @@ pub async fn upload_video(
                 error: None,
                 video_name: Some(video_name_clone.clone()),
                 created_at: now_millis(),
+                variant_percentage: None,
             };
             update_progress(&state_clone.progress, &upload_id_clone, encoding_progress).await;
 
@@ -277,23 +281,32 @@ pub async fn upload_video(
 
             // Extract each subtitle stream
             for (idx, sub) in subtitle_streams.iter().enumerate() {
-                let ext = match sub.codec_name.as_str() {
-                    "ass" | "ssa" => "ass",
-                    "subrip" | "srt" => "srt",
-                    _ => "ass", // Default to ASS
-                };
-                let sub_filename = format!("track_{}.{}", idx, ext);
-                let sub_path = subtitles_dir.join(&sub_filename);
+                if is_vobsub_subtitle(&sub.codec_name) {
+                    // VobSub needs special handling to generate both .sub and .idx files
+                    if let Err(e) =
+                        extract_vobsub_subtitle(&video_path_clone, idx as i32, &subtitles_dir, idx)
+                            .await
+                    {
+                        error!(
+                            "Failed to extract VobSub subtitle stream {} (track {}): {}",
+                            sub.stream_index, idx, e
+                        );
+                    }
+                } else {
+                    let ext = get_subtitle_extension(&sub.codec_name);
+                    let sub_filename = format!("track_{}.{}", idx, ext);
+                    let sub_path = subtitles_dir.join(&sub_filename);
 
-                // Use enumerate index (idx) as relative subtitle stream index
-                if let Err(e) =
-                    extract_subtitle(&video_path_clone, idx as i32, &sub_path, &sub.codec_name)
-                        .await
-                {
-                    error!(
-                        "Failed to extract subtitle stream {} (track {}): {}",
-                        sub.stream_index, idx, e
-                    );
+                    // Use enumerate index (idx) as relative subtitle stream index
+                    if let Err(e) =
+                        extract_subtitle(&video_path_clone, idx as i32, &sub_path, &sub.codec_name)
+                            .await
+                    {
+                        error!(
+                            "Failed to extract subtitle stream {} (track {}): {}",
+                            sub.stream_index, idx, e
+                        );
+                    }
                 }
             }
 
@@ -311,6 +324,7 @@ pub async fn upload_video(
                 error: None,
                 video_name: Some(video_name_clone.clone()),
                 created_at: now_millis(),
+                variant_percentage: None,
             };
             update_progress(&state_clone.progress, &upload_id_clone, upload_progress).await;
 
@@ -423,6 +437,7 @@ pub async fn upload_video(
                     error: None,
                     video_name: Some(video_name_clone.clone()),
                     created_at: now_millis(),
+                    variant_percentage: None,
                 };
                 update_progress(&state_clone.progress, &upload_id_clone, completion_progress).await;
             }
@@ -439,6 +454,7 @@ pub async fn upload_video(
                     error: Some(e.to_string()),
                     video_name: Some(video_name_clone.clone()),
                     created_at: now_millis(),
+                    variant_percentage: None,
                 };
                 update_progress(&state_clone.progress, &upload_id_clone, error_progress).await;
             }
@@ -577,6 +593,7 @@ pub async fn upload_chunk(
                 error: None,
                 video_name: Some(file_name.replace(&['.'][..], "_")),
                 created_at: now_millis(),
+                variant_percentage: None,
             };
             state
                 .progress
@@ -631,6 +648,7 @@ pub async fn upload_chunk(
         error: None,
         video_name: Some(file_name.replace(&['.'][..], "_")),
         created_at: now_millis(),
+        variant_percentage: None,
     };
     update_progress(&state.progress, &upload_id, progress).await;
 
@@ -688,6 +706,7 @@ pub async fn finalize_chunked_upload(
         error: None,
         video_name: Some(body.name.clone()),
         created_at: now_millis(),
+        variant_percentage: None,
     };
     update_progress(&state.progress, &upload_id, progress).await;
     let final_path =
@@ -739,6 +758,7 @@ pub async fn finalize_chunked_upload(
         error: None,
         video_name: Some(video_name.clone()),
         created_at: now_millis(),
+        variant_percentage: None,
     };
     update_progress(&state.progress, &upload_id, progress).await;
     let state_clone = state.clone();
@@ -777,6 +797,7 @@ pub async fn finalize_chunked_upload(
                 error: None,
                 video_name: Some(video_name_clone.clone()),
                 created_at: now_millis(),
+                variant_percentage: None,
             };
             update_progress(&state_clone.progress, &upload_id_clone, encoding_progress).await;
 
@@ -851,6 +872,7 @@ pub async fn finalize_chunked_upload(
                 error: None,
                 video_name: Some(video_name_clone.clone()),
                 created_at: now_millis(),
+                variant_percentage: None,
             };
             update_progress(&state_clone.progress, &upload_id_clone, upload_progress).await;
 
@@ -963,6 +985,7 @@ pub async fn finalize_chunked_upload(
                     error: None,
                     video_name: Some(video_name_clone.clone()),
                     created_at: now_millis(),
+                    variant_percentage: None,
                 };
                 update_progress(&state_clone.progress, &upload_id_clone, completion_progress).await;
             }
@@ -979,6 +1002,7 @@ pub async fn finalize_chunked_upload(
                     error: Some(e.to_string()),
                     video_name: Some(video_name_clone.clone()),
                     created_at: now_millis(),
+                    variant_percentage: None,
                 };
                 update_progress(&state_clone.progress, &upload_id_clone, error_progress).await;
             }
@@ -1014,6 +1038,7 @@ pub async fn list_queues(State(state): State<AppState>) -> Json<QueueListRespons
             status: p.status.clone(),
             video_name: p.video_name.clone(),
             created_at: p.created_at,
+            variant_percentage: p.variant_percentage,
         })
         .collect();
 
@@ -1154,6 +1179,7 @@ pub async fn cancel_queue(
             error: Some("Cancelled by user".to_string()),
             video_name: progress.video_name.clone(),
             created_at: progress.created_at,
+            variant_percentage: None,
         };
         progress_map.insert(upload_id.clone(), cancelled_progress);
 

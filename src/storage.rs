@@ -341,6 +341,7 @@ pub async fn upload_hls_to_r2(
                         error: None,
                         video_name: existing_video_name,
                         created_at: existing_created_at,
+                        variant_percentage: None,
                     };
                     state.progress.write().await.insert(id, progress_update);
                 }

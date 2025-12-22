@@ -1,6 +1,6 @@
 'use client'
 
-import React, { createContext, useContext, useState, useCallback, useRef } from 'react'
+import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react'
 
 export interface FileWithMetadata {
   id: string
@@ -38,7 +38,7 @@ interface UploadContextType {
 
 const UploadContext = createContext<UploadContextType | undefined>(undefined)
 
-const CHUNK_SIZE = 10 * 1024 * 1024
+const CHUNK_SIZE = 50 * 1024 * 1024
 const MAX_CONCURRENT_CHUNKS = 1
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY = 1000
@@ -77,6 +77,37 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null)
 
   const abortControllerRef = useRef<AbortController | null>(null)
+  // Track active upload IDs for cleanup on browser close
+  const activeUploadIdsRef = useRef<Set<string>>(new Set())
+
+  // Handle browser close to abort active uploads
+  useEffect(() => {
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (activeUploadIdsRef.current.size === 0) return
+
+      // Warn the user
+      event.preventDefault()
+      event.returnValue = 'You have uploads in progress. Are you sure you want to leave?'
+
+      // Use sendBeacon to abort active uploads (fire-and-forget)
+      const apiBase = getApiBaseUrl()
+      for (const uploadId of activeUploadIdsRef.current) {
+        try {
+          navigator.sendBeacon(
+            `${apiBase}/api/upload/abort`,
+            new Blob([JSON.stringify({ upload_id: uploadId })], { type: 'application/json' })
+          )
+        } catch (err) {
+          console.warn('Failed to send abort beacon:', err)
+        }
+      }
+
+      return event.returnValue
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [])
 
   // Add new files with default metadata
   const addFiles = useCallback((newFiles: File[]) => {
@@ -475,6 +506,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       }
 
       updateUploadItem(item.id, { status: 'uploading', progress: 0, speed: 0 })
+      // Track this upload for browser close cleanup
+      activeUploadIdsRef.current.add(item.id)
       startProgressInterval()
 
       try {
@@ -485,9 +518,11 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         }
 
         stopProgressInterval()
+        activeUploadIdsRef.current.delete(item.id)
         updateUploadItem(item.id, { status: 'queued', progress: 100, speed: 0 })
       } catch (err) {
         stopProgressInterval()
+        activeUploadIdsRef.current.delete(item.id)
         const errorMessage = err instanceof Error ? err.message : String(err)
         updateUploadItem(item.id, { status: 'error', error: errorMessage, speed: 0 })
         throw err

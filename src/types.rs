@@ -18,6 +18,8 @@ pub struct ProgressUpdate {
     pub error: Option<String>,
     pub video_name: Option<String>,
     pub created_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant_percentage: Option<u32>,
 }
 
 pub type ProgressMap = Arc<RwLock<HashMap<String, ProgressUpdate>>>;
@@ -169,6 +171,8 @@ pub struct QueueItem {
     pub status: String,
     pub video_name: Option<String>,
     pub created_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant_percentage: Option<u32>,
 }
 
 #[derive(Serialize)]
