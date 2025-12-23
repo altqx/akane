@@ -1,6 +1,7 @@
 'use client'
 
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react'
+import xxhash from 'xxhash-wasm'
 
 export interface FileWithMetadata {
   id: string
@@ -42,6 +43,15 @@ const CHUNK_SIZE = 50 * 1024 * 1024
 const MAX_CONCURRENT_CHUNKS = 1
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY = 1000
+
+// Cached xxhash instance
+let xxhashInstance: Awaited<ReturnType<typeof xxhash>> | null = null
+async function getXXHash() {
+  if (!xxhashInstance) {
+    xxhashInstance = await xxhash()
+  }
+  return xxhashInstance
+}
 
 // Fallback UUID generator for browsers that don't support crypto.randomUUID
 function generateUUID(): string {
@@ -148,6 +158,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       chunkIndex: number,
       totalChunks: number,
       fileName: string,
+      chunkHash: string,
       token: string | null,
       onChunkProgress: (bytesUploaded: number) => void,
       signal?: AbortSignal
@@ -165,6 +176,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
             formData.append('chunk_index', chunkIndex.toString())
             formData.append('total_chunks', totalChunks.toString())
             formData.append('file_name', fileName)
+            formData.append('chunk_hash', chunkHash)
 
             xhr.upload.addEventListener('progress', (event) => {
               if (event.lengthComputable) {
@@ -288,6 +300,9 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       const chunkProgress = new Map<number, number>() // chunkIndex -> bytes uploaded for that chunk
       const completedChunks = new Set<number>()
 
+      // Get xxhash instance for chunk hashing
+      const hasher = await getXXHash()
+
       const updateTotalProgress = () => {
         let totalBytesUploaded = 0
         for (const [, bytes] of chunkProgress) {
@@ -316,12 +331,26 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         const end = Math.min(start + CHUNK_SIZE, file.size)
         const chunk = file.slice(start, end)
 
+        // Compute chunk hash for integrity verification
+        const chunkBuffer = await chunk.arrayBuffer()
+        const chunkHash = hasher.h64Raw(new Uint8Array(chunkBuffer)).toString(16).padStart(16, '0')
+
         const onChunkProgress = (chunkBytesUploaded: number) => {
           chunkProgress.set(chunkIndex, chunkBytesUploaded)
           updateTotalProgress()
         }
 
-        await uploadChunkWithRetry(chunk, uploadId, chunkIndex, totalChunks, file.name, token, onChunkProgress, signal)
+        await uploadChunkWithRetry(
+          chunk,
+          uploadId,
+          chunkIndex,
+          totalChunks,
+          file.name,
+          chunkHash,
+          token,
+          onChunkProgress,
+          signal
+        )
         completedChunks.add(chunkIndex)
         chunkProgress.delete(chunkIndex) // Clean up, completedChunks tracks this now
         updateTotalProgress()

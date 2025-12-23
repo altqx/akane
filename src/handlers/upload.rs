@@ -24,6 +24,7 @@ use std::time::Duration;
 use tokio::{fs, io::AsyncReadExt, io::AsyncWriteExt};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+use xxhash_rust::xxh64::xxh64;
 
 // Stale upload timeout: 30 minutes of inactivity
 const STALE_UPLOAD_TIMEOUT_MS: u64 = 30 * 60 * 1000;
@@ -495,6 +496,7 @@ pub async fn upload_chunk(
     let mut chunk_index: Option<u32> = None;
     let mut total_chunks: Option<u32> = None;
     let mut file_name: Option<String> = None;
+    let mut chunk_hash: Option<String> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -541,6 +543,14 @@ pub async fn upload_chunk(
                         .map_err(|e| internal_err(anyhow::anyhow!(e)))?,
                 );
             }
+            Some("chunk_hash") => {
+                chunk_hash = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| internal_err(anyhow::anyhow!(e)))?,
+                );
+            }
             _ => continue,
         }
     }
@@ -554,12 +564,30 @@ pub async fn upload_chunk(
     let file_name =
         file_name.ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing file_name".to_string()))?;
 
+    // Verify chunk integrity if hash provided
+    let hash_verified = if let Some(ref expected_hash) = chunk_hash {
+        let actual_hash = format!("{:016x}", xxh64(&chunk_data, 0));
+        if actual_hash != *expected_hash {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "Chunk integrity check failed: expected {}, got {}",
+                    expected_hash, actual_hash
+                ),
+            ));
+        }
+        true
+    } else {
+        false
+    };
+
     info!(
-        "Received chunk {}/{} for upload {} (file: {})",
+        "Received chunk {}/{} for upload {} (file: {}, hash_verified: {})",
         chunk_index + 1,
         total_chunks,
         upload_id,
-        file_name
+        file_name,
+        hash_verified
     );
 
     let temp_dir = {
@@ -656,6 +684,7 @@ pub async fn upload_chunk(
         upload_id,
         chunk_index,
         received: true,
+        hash_verified,
     }))
 }
 

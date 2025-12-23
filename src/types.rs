@@ -199,6 +199,7 @@ pub struct ChunkUploadResponse {
     pub upload_id: String,
     pub chunk_index: u32,
     pub received: bool,
+    pub hash_verified: bool,
 }
 
 #[derive(Deserialize)]
